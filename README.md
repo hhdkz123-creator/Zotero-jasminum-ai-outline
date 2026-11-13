@@ -1,41 +1,49 @@
-# Zotero Jasminum AI 大纲优化版
+# Zotero-jasminum-ai-outline
 
-基于 [茉莉花（Jasminum）](https://github.com/l0o0/jasminum) **1.1.44** 的定制版本，优化 Zotero PDF 阅读器的「AI 全文大纲识别」流程。
+**Zotero 茉莉花 · AI 大纲优化版**（基于 [Jasminum](https://github.com/l0o0/jasminum) 1.1.44 的非官方衍生版本）
 
-> 本仓库包含**增量修改脚本与自动构建工作流**，而非直接复制的完整上游源码。构建时固定检出上游提交 `9af49f7175d2257a15d1ee1598da893569510e29`，应用本仓库补丁并打包 XPI。
+本仓库由上游指定提交 `9af49f7175d2257a15d1ee1598da893569510e29`、可公开审查的增量补丁及 GitHub Actions 构成，支持重新构建可安装的 XPI。
 
-## 功能
+## 核心功能
 
-- **静默运行**：点击大纲工具栏中的 AI 图标后，在后台识别，不弹出遮挡 PDF 的任务或校对窗口。
-- **自动保存**：识别完成后自动调用上游已有的保存逻辑，写入 PDF 和茉莉花大纲，刷新阅读器。
-- **图标常驻**：AI 全文大纲识别按钮直接显示在大纲工具栏，不必展开「⋮」。
-- **过程反馈**：识别时 AI 图标旋转，并显示已完成页数；写入时显示「写入中」；成功后恢复原状。
-- **失败提示**：识别或写入失败时弹出错误信息；重试时尽量复用已经成功识别的页面。
+- 点击 PDF 大纲工具栏中的 AI 图标后在后台识别，正常流程不再弹出遮挡文献的任务或核对窗口。
+- 识别成功后自动保存 PDF 与茉莉花大纲；失败时显示具体错误。
+- 将 AI 全文大纲识别按钮固定在大纲工具栏，不必展开「⋮」。
+- 识别期间显示旋转图标及识别页数，写入时显示状态，成功后自动恢复。
 
-## 安装
+## 安装和使用
 
-在 [Releases](https://github.com/hhdkz123-creator/jasminum-ai-outline/releases) 下载 `.xpi` 文件，打开 Zotero → 工具 → 插件 → 齿轮 → 从文件安装插件，安装后重启 Zotero。若已有原版茉莉花，先备份数据并确认插件兼容性。
+1. 前往 [Releases](../../releases)，下载最新的 `.xpi` 安装文件。
+2. 打开 Zotero → 工具 → 插件 → 齿轮 → 从文件安装插件，并按需重启 Zotero。
+3. 在 Zotero → 设置 → 茉莉花 → AI 识别中填写 **支持图片输入的模型**、API Base URL 和 API Key。**这些信息不会上传到本仓库。**
+4. 打开 PDF → 大纲侧栏 → 点击星光 AI 图标即可运行。
 
-打开 PDF → 左侧茉莉花大纲 → 点击星光 AI 图标。首次使用需先到 Zotero 设置中的茉莉花「AI 识别」配置兼容多模态输入的 API 和模型。**本仓库不包含也不需要你的 API Key。**
+## 定制版版本规则（重要）
 
-## 构建
+| 项目 | 值 |
+| --- | --- |
+| 项目名称、Zotero 插件显示名称 | `Zotero-jasminum-ai-outline` |
+| GitHub Release | `v1.1.44-ai.2` |
+| Zotero/Firefox 插件内部版本 | `1.1.44.2` |
+| 插件 ID | `jasminum@linxzh.com`（保留上游 ID） |
+| 更新方式 | 手动安装新版 XPI，已移除上游 `update_url` |
 
-构建由 [GitHub Actions](.github/workflows/build-release.yml) 自动执行，无需本地配置：
+**为何内部版本是 `1.1.44.2`？** 扩展清单建议使用 1～4 段的数字版本号。保留上游插件 ID 时，数字版本 `1.1.44.2` 也比原版 `1.1.44` 高，方便同一 Zotero 安装进行替换；对外仍以 `ai.2` 标识定制发行版。
 
-1. 固定下载上游 `l0o0/jasminum` 的指定提交。
-2. 运行 [静默识别补丁](patches/patch_jasminum_silent_outline.py)，随后运行 [进度反馈补丁](patches/patch_jasminum_outline_progress.py)。
-3. 使用 Node.js 22 + pnpm 9.15.1 安装依赖并运行 `pnpm run build`。
-4. 将构建出的 XPI 作为 Actions Artifact 上传，并在成功后发布到 Releases（若仓库 Actions 权限允许）。
+**为什么暂时禁用自动更新？** 定制版与官方原版使用同一个插件 ID，自动更新原版可能覆盖静默识别功能。待建立独立可靠的更新源后，才能安全启用定制版更新。后续版本需同步递增内部版本、发布标签和附件名称。
 
-## 注意事项
+## 代码、构建与安全
 
-- **请先使用 PDF 副本测试。** 自动保存可能替换原有大纲；识别时对 PDF 人工大纲的修改会触发冲突检测，但这不等于对所有已有人工内容提供无损合并。
-- 识别按上游实现发送 PDF 页面图片给已配置的 AI 服务，相关 API 调用可能产生费用。
-- 自动化构建成功不等于在所有 Zotero 环境中实机验证。建议先验证识别、保存、错误处理及插件重启。
-- 定制版与原版可能使用相同插件 ID；官方插件自动更新可能覆盖修改。
+[构建工作流](.github/workflows/build-release.yml) 从固定上游版本下载源码，然后依次执行：
+
+- [静默识别与自动保存补丁](patches/patch_jasminum_silent_outline.py)
+- [后台进度反馈补丁](patches/patch_jasminum_outline_progress.py)
+- [版本和名称元数据补丁](patches/patch_jasminum_release_metadata.py)
+
+使用 Node.js 22 与 pnpm 9.15.1 构建，随后验证 XPI 中的名称、数字版本号、插件 ID 及更新字段，成功后创建**新的** Release，不覆盖已有安装包。
+
+**首次使用前务必备份 Zotero 数据和重要 PDF。** 自动大纲写入可能替换已有目录；请先使用 PDF 副本确认识别、保存、错误处理、插件重启以及进度反馈正常。自动编译成功不等于覆盖所有 Zotero 版本的实机兼容性测试。
 
 ## 上游与许可证
 
-原项目：[l0o0/jasminum](https://github.com/l0o0/jasminum)，原作者及贡献者拥有相应版权。此项目是非官方衍生修改版，与上游无官方关联。
-
-依据上游许可证，以 **GNU Affero General Public License v3.0 or later (AGPL-3.0-or-later)** 发布；参见 [LICENSE](LICENSE)。对上游源码的改动由本仓库补丁记录。
+原项目：[l0o0/jasminum](https://github.com/l0o0/jasminum)。本项目是独立的非官方衍生版本，非原作者官方发布。保留上游版权，遵循 **AGPL-3.0-or-later**，参见 [LICENSE](LICENSE)。衍生代码可通过固定的上游提交和全部补丁重现。

@@ -1,4 +1,4 @@
-name: Build and release Jasminum AI Outline
+name: Build Zotero-jasminum-ai-outline
 
 on:
   push:
@@ -11,6 +11,11 @@ on:
 
 permissions:
   contents: write
+
+env:
+  UPSTREAM_REF: 9af49f7175d2257a15d1ee1598da893569510e29
+  TAG: v1.1.44-ai.2
+  RELEASE_FILE: Zotero-jasminum-ai-outline_v1.1.44-ai.2.xpi
 
 jobs:
   build:
@@ -29,16 +34,16 @@ jobs:
         with:
           version: "9.15.1"
 
-      - name: Download pinned upstream Jasminum source
+      - name: Download pinned Jasminum source
         run: |
           git clone --quiet https://github.com/l0o0/jasminum.git jasminum-src
-          git -C jasminum-src checkout --quiet 9af49f7175d2257a15d1ee1598da893569510e29
-          node -p "require('./jasminum-src/package.json').version"
+          git -C jasminum-src checkout --quiet "$UPSTREAM_REF"
 
-      - name: Apply silent recognition and progress feedback
+      - name: Apply feature and branding patches
         run: |
           python3 patches/patch_jasminum_silent_outline.py jasminum-src
           python3 patches/patch_jasminum_outline_progress.py jasminum-src
+          python3 patches/patch_jasminum_release_metadata.py jasminum-src
 
       - name: Install dependencies
         working-directory: jasminum-src
@@ -48,29 +53,47 @@ jobs:
         working-directory: jasminum-src
         run: pnpm run build
 
-      - name: Prepare downloadable package
+      - name: Prepare and validate XPI metadata
         run: |
-          test -s jasminum-src/build/jasminum_1.1.44.xpi
-          cp jasminum-src/build/jasminum_1.1.44.xpi jasminum_1.1.44-ai.1.xpi
-          ls -lh jasminum_1.1.44-ai.1.xpi
+          set -euo pipefail
+          test -s jasminum-src/build/jasminum_1.1.44-ai.2.xpi
+          cp jasminum-src/build/jasminum_1.1.44-ai.2.xpi "$RELEASE_FILE"
+          python3 - <<'PY'
+          import json
+          import os
+          import zipfile
+          from pathlib import Path
+          xpi = Path(os.environ["RELEASE_FILE"])
+          with zipfile.ZipFile(xpi) as z:
+              names = z.namelist()
+              candidates = [name for name in names if name in ("manifest.json", "addon/manifest.json")]
+              assert len(candidates) == 1, f"Missing/ambiguous manifest.json: {candidates}"
+              manifest = json.loads(z.read(candidates[0]))
+          assert manifest.get("version") == "1.1.44.2", manifest
+          assert manifest.get("name") == "Zotero-jasminum-ai-outline", manifest
+          zotero = manifest["applications"]["zotero"]
+          assert zotero.get("id") == "jasminum@linxzh.com", zotero
+          assert "update_url" not in zotero, zotero
+          print("Validated:", xpi, "size=", xpi.stat().st_size, "version=", manifest["version"])
+          PY
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: jasminum-ai-outline-xpi
-          path: jasminum_1.1.44-ai.1.xpi
+          name: Zotero-jasminum-ai-outline-XPI
+          path: ${{ env.RELEASE_FILE }}
           if-no-files-found: error
 
-      - name: Publish or update GitHub Release
+      - name: Publish new GitHub Release without overwriting old versions
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v1.1.44-ai.1
         run: |
+          set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" jasminum_1.1.44-ai.1.xpi --clobber
-          else
-            gh release create "$TAG" jasminum_1.1.44-ai.1.xpi \
-              --title "Jasminum AI 大纲优化版 v1.1.44-ai.1" \
-              --notes "非官方 Jasminum 1.1.44 衍生版本：后台静默识别、自动保存、AI 按钮常驻、页数进度反馈。基于上游 AGPL-3.0-or-later 项目，源码修改见仓库 patches/。使用前备份 Zotero 和 PDF，并先用测试文档验证。"
+            echo "::error::Release $TAG already exists; bump the tag and versions before publishing again."
+            exit 1
           fi
+          gh release create "$TAG" "$RELEASE_FILE" \
+            --title "Zotero-jasminum-ai-outline v1.1.44-ai.2" \
+            --notes "茉莉花 Jasminum 1.1.44 非官方优化版。AI 全文大纲后台静默识别、自动写入、工具栏常驻和进度提示。插件显示名称：Zotero-jasminum-ai-outline；Zotero 内部版本号：1.1.44.2；使用与原版相同的插件 ID 以替换原版；禁用上游自动更新以避免覆盖修改。请先使用 PDF 副本测试。源码补丁见仓库 patches/；遵循 AGPL-3.0-or-later。"
