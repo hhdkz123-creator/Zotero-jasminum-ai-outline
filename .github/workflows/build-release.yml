@@ -1,0 +1,76 @@
+name: Build and release Jasminum AI Outline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/build-release.yml"
+      - "patches/**"
+      - "README.md"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout custom patches
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up pnpm 9.15.1
+        uses: pnpm/action-setup@v4
+        with:
+          version: "9.15.1"
+
+      - name: Download pinned upstream Jasminum source
+        run: |
+          git clone --quiet https://github.com/l0o0/jasminum.git jasminum-src
+          git -C jasminum-src checkout --quiet 9af49f7175d2257a15d1ee1598da893569510e29
+          node -p "require('./jasminum-src/package.json').version"
+
+      - name: Apply silent recognition and progress feedback
+        run: |
+          python3 patches/patch_jasminum_silent_outline.py jasminum-src
+          python3 patches/patch_jasminum_outline_progress.py jasminum-src
+
+      - name: Install dependencies
+        working-directory: jasminum-src
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Type check and build XPI
+        working-directory: jasminum-src
+        run: pnpm run build
+
+      - name: Prepare downloadable package
+        run: |
+          test -s jasminum-src/build/jasminum_1.1.44.xpi
+          cp jasminum-src/build/jasminum_1.1.44.xpi jasminum_1.1.44-ai.1.xpi
+          ls -lh jasminum_1.1.44-ai.1.xpi
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: jasminum-ai-outline-xpi
+          path: jasminum_1.1.44-ai.1.xpi
+          if-no-files-found: error
+
+      - name: Publish or update GitHub Release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v1.1.44-ai.1
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" jasminum_1.1.44-ai.1.xpi --clobber
+          else
+            gh release create "$TAG" jasminum_1.1.44-ai.1.xpi \
+              --title "Jasminum AI 大纲优化版 v1.1.44-ai.1" \
+              --notes "非官方 Jasminum 1.1.44 衍生版本：后台静默识别、自动保存、AI 按钮常驻、页数进度反馈。基于上游 AGPL-3.0-or-later 项目，源码修改见仓库 patches/。使用前备份 Zotero 和 PDF，并先用测试文档验证。"
+          fi
