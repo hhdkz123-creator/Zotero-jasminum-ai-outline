@@ -64,10 +64,29 @@ jobs:
           import zipfile
           from pathlib import Path
           xpi = Path(os.environ["RELEASE_FILE"])
-          with zipfile.ZipFile(xpi) as z:
-              names = z.namelist()
-              candidates = [name for name in names if name in ("manifest.json", "addon/manifest.json")]
-              assert len(candidates) == 1, f"Missing/ambiguous manifest.json: {candidates}"
+          import tempfile
+          # The upstream scaffold reinjects update_url during packing.
+          # Remove it from the final XPI without adding a duplicate ZIP entry.
+          with tempfile.NamedTemporaryFile(suffix=".xpi", dir=xpi.parent, delete=False) as tmp:
+              temp_path = Path(tmp.name)
+          try:
+              with zipfile.ZipFile(xpi, "r") as source, zipfile.ZipFile(temp_path, "w") as target:
+                  candidates = [name for name in source.namelist() if name in ("manifest.json", "addon/manifest.json")]
+                  assert len(candidates) == 1, f"Missing/ambiguous manifest.json: {candidates}"
+                  for member in source.infolist():
+                      data = source.read(member.filename)
+                      if member.filename == candidates[0]:
+                          manifest = json.loads(data)
+                          manifest["applications"]["zotero"].pop("update_url", None)
+                          data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\\n").encode("utf-8")
+                      target.writestr(member, data)
+              os.replace(temp_path, xpi)
+          finally:
+              if temp_path.exists():
+                  temp_path.unlink()
+          # Read it back to verify the actual user-installable XPI.
+          with zipfile.ZipFile(xpi, "r") as z:
+              assert z.testzip() is None, "Corrupt XPI ZIP"
               manifest = json.loads(z.read(candidates[0]))
           assert manifest.get("version") == "1.1.44.2", manifest
           assert manifest.get("name") == "Zotero-jasminum-ai-outline", manifest
