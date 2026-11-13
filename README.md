@@ -1,4 +1,4 @@
-# Jasminum AI 大纲优化版
+# Zotero Jasminum AI 大纲优化版
 
 基于 [茉莉花（Jasminum）](https://github.com/l0o0/jasminum) **1.1.44** 的定制版本，优化 Zotero PDF 阅读器的「AI 全文大纲识别」流程。
 
