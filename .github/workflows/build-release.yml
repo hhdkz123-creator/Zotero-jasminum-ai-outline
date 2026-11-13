@@ -78,7 +78,7 @@ jobs:
                       if member.filename == candidates[0]:
                           manifest = json.loads(data)
                           manifest["applications"]["zotero"].pop("update_url", None)
-                          data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\\n").encode("utf-8")
+                          data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
                       target.writestr(member, data)
               os.replace(temp_path, xpi)
           finally:
