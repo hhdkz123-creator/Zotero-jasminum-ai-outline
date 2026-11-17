@@ -1,0 +1,2742 @@
+diff --git a/addon/chrome/content/preferences-main.xhtml b/addon/chrome/content/preferences-main.xhtml
+index 38971da..2ed6798 100644
+--- a/addon/chrome/content/preferences-main.xhtml
++++ b/addon/chrome/content/preferences-main.xhtml
+@@ -114,6 +114,20 @@
+       data-l10n-attrs="tooltiptext"
+     ></image>
+   </hbox>
++  <hbox align="center">
++    <label value="AI 大纲识别模式" control="jasminum-outline-mode" />
++    <menulist id="jasminum-outline-mode" preference="outlineRecognitionMode">
++      <menupopup>
++        <menuitem label="智能节省模式（目录优先）" value="smart" />
++        <menuitem label="完整识别模式（所有可见标题）" value="full" />
++      </menupopup>
++    </menulist>
++  </hbox>
++  <hbox align="center">
++    <label value="单次任务 AI 请求上限" control="jasminum-outline-limit" />
++    <html:input id="jasminum-outline-limit" type="number" min="1" max="1000" step="1" preference="outlineRequestLimit" style="width:80px" />
++  </hbox>
++  <description>达到上限后暂停；再次点 AI 可增加同等额度继续。成功页会缓存，token 仅显示接口实际返回值。</description>
+   <!-- AI 接口 -->
+   <hbox align="center">
+     <label data-l10n-id="pref-group-ai" />
+@@ -357,6 +371,12 @@
+       data-l10n-id="outline-desc"
+     ></image>
+   </hbox>
++  <checkbox
++    id="zotero-prefpane-__addonRef__-autoRecognizeOutline"
++    native="true"
++    preference="autoRecognizeOutline"
++    data-l10n-id="label-autoRecognizeOutline"
++  />
+   <checkbox
+     id="zotero-prefpane-__addonRef__-showSelectionPopupActions"
+     native="true"
+diff --git a/addon/locale/en-US/preferences-main.ftl b/addon/locale/en-US/preferences-main.ftl
+index 152c64a..663cad6 100644
+--- a/addon/locale/en-US/preferences-main.ftl
++++ b/addon/locale/en-US/preferences-main.ftl
+@@ -192,3 +192,7 @@ llm-profile-list = Saved connections
+ llm-profile-add = Add
+ llm-profile-delete = Delete
+ llm-profile-name = Name
++
++label-autoRecognizeOutline =
++  .label = Automatically generate missing PDF outlines with AI and save to PDF
++  .tooltiptext = Uses the current AI connection, writes the recognized outline to the original PDF and refreshes the reader. Skips PDFs with built-in outlines. The manual AI button remains available when disabled.
+diff --git a/addon/locale/zh-CN/preferences-main.ftl b/addon/locale/zh-CN/preferences-main.ftl
+index a06ee8f..e433e5a 100644
+--- a/addon/locale/zh-CN/preferences-main.ftl
++++ b/addon/locale/zh-CN/preferences-main.ftl
+@@ -192,3 +192,7 @@ llm-profile-list = 已保存接口
+ llm-profile-add = 新增
+ llm-profile-delete = 删除
+ llm-profile-name = 配置名称
++
++label-autoRecognizeOutline =
++  .label = 无原生大纲时，自动 AI 全文识别并保存到 PDF
++  .tooltiptext = 使用当前 AI 连接识别全文，成功后自动写入原 PDF 并刷新大纲。已有 PDF 内置大纲时跳过；关闭后仍可手动点击 AI 按钮。
+diff --git a/addon/locale/zh-TW/preferences-main.ftl b/addon/locale/zh-TW/preferences-main.ftl
+index 2df558c..9920af3 100644
+--- a/addon/locale/zh-TW/preferences-main.ftl
++++ b/addon/locale/zh-TW/preferences-main.ftl
+@@ -192,3 +192,7 @@ llm-profile-list = 已儲存介面
+ llm-profile-add = 新增
+ llm-profile-delete = 刪除
+ llm-profile-name = 設定名稱
++
++label-autoRecognizeOutline =
++  .label = 無原生大綱時，自動 AI 全文辨識並儲存至 PDF
++  .tooltiptext = 使用目前的 AI 連線辨識全文，成功後自動寫入原 PDF 並重新整理大綱。已有 PDF 內建大綱時略過；關閉後仍可手動點擊 AI 按鈕。
+diff --git a/addon/prefs.js b/addon/prefs.js
+index 4d0a61a..3570dc0 100644
+--- a/addon/prefs.js
++++ b/addon/prefs.js
+@@ -29,6 +29,10 @@ pref("translatorUpdateTime", "0");
+ pref("translatorSource", "");
+ /* bookmark */
+ pref("enableBookmark", true);
++pref("autoRecognizeOutline", true);
+ pref("showSelectionPopupActions", true);
+ pref("newNodeAsChild", false);
+ pref("disableZoteroOutline", true);
++
++pref("outlineRecognitionMode", "smart");
++pref("outlineRequestLimit", 12);
+diff --git a/src/modules/outline/auto.ts b/src/modules/outline/auto.ts
+new file mode 100644
+index 0000000..d7d4e17
+--- /dev/null
++++ b/src/modules/outline/auto.ts
+@@ -0,0 +1,36 @@
++import { outlineJob } from "./background";
++import { getPref } from "../../utils/prefs";
++
++// Includes in-flight checks and paused/failed attempts, so reopening a document
++// cannot repeatedly start AI work. Manual retry remains available on the toolbar.
++const checkedItems = new Set<number>();
++
++export async function autoRecognizeOutline(
++  reader: _ZoteroTypes.ReaderInstance,
++  doc: Document,
++) {
++  if (!getPref("autoRecognizeOutline")) return "disabled";
++  const item = reader._item;
++  if (checkedItems.has(item.id)) return "already-checked";
++  if (item.deleted || !item.isPDFAttachment() || !item.isEditable())
++    return "unavailable";
++  checkedItems.add(item.id);
++  try {
++    const path = await item.getFilePathAsync();
++    if (!path) return "unavailable";
++    // Read the PDF itself: the sidecar cache may be empty or out of date.
++    const nativeOutline = await outlineJob<OutlineNode[]>("nativeOutline", path);
++    if (nativeOutline.length) return "has-native-outline";
++    if (!getPref("autoRecognizeOutline")) return "disabled";
++    const button = doc.getElementById("j-outline-ai") as HTMLButtonElement | null;
++    if (!button?.isConnected) return "closed";
++    if (button.disabled) return "busy";
++    // The normal toolbar handler owns progress, pause, deduplication, PDF save
++    // and reader refresh. Automatic recognition uses that exact same path.
++    button.click();
++    return "started";
++  } catch (error) {
++    ztoolkit.log("Automatic PDF outline check failed", error);
++    return "failed";
++  }
++}
+diff --git a/src/modules/outline/index.ts b/src/modules/outline/index.ts
+index 80cf524..89e1ee9 100644
+--- a/src/modules/outline/index.ts
++++ b/src/modules/outline/index.ts
+@@ -1,5 +1,6 @@
+ import { followOutlinePages } from "./follow";
+-import { openOutlineTask } from "./taskView";
++import { autoRecognizeOutline } from "./auto";
++import { openOutlineTask, pauseOutlineTask } from "./taskView";
+ import { wait } from "zotero-plugin-toolkit";
+ import { getString } from "../../utils/locale";
+ import { initEventListener } from "./events";
+@@ -37,6 +38,27 @@ export function renderTree(
+     id: "j-outline-toolbar",
+     classList: ["j-hidden"], // 默认隐藏
+     children: [
++      {
++        tag: "button",
++        id: "j-outline-ai",
++        classList: ["j-outline-toolbar-button", "toolbar-button"],
++        properties: { innerHTML: ICONS.ai },
++        attributes: {
++          title: getString("outline-ai-title"),
++          "aria-label": getString("outline-ai-title"),
++        },
++      },
++      {
++        tag: "button",
++        id: "j-outline-save-pdf",
++        classList: ["j-outline-toolbar-button", "toolbar-button"],
++        properties: { innerHTML: ICONS.save },
++        attributes: {
++          type: "button",
++          title: getString("outline-save-to-pdf"),
++          "aria-label": getString("outline-save-to-pdf"),
++        },
++      },
+       {
+         tag: "button",
+         id: "j-outline-expand-all",
+@@ -65,23 +87,6 @@ export function renderTree(
+         properties: { innerHTML: ICONS.outlineDelete },
+         attributes: { title: getString("outline-delete") },
+       },
+-      {
+-        tag: "button",
+-        id: "j-outline-ai",
+-        classList: ["j-outline-toolbar-button", "toolbar-button"],
+-        properties: { innerHTML: ICONS.ai },
+-        attributes: {
+-          title: getString("outline-ai-title"),
+-          "aria-label": getString("outline-ai-title"),
+-        },
+-      },
+-      {
+-        tag: "button",
+-        id: "j-outline-save-pdf",
+-        classList: ["j-outline-toolbar-button", "toolbar-button"],
+-        properties: { innerHTML: ICONS.save },
+-        attributes: { title: getString("outline-save-to-pdf") },
+-      },
+     ],
+   });
+   for (const [action, icon] of [
+@@ -97,75 +102,20 @@ export function renderTree(
+     button.setAttribute("aria-label", button.title);
+     toolbar.append(button);
+   }
+-  const more = doc.createElement("button");
+-  more.id = "j-outline-more";
+-  more.type = "button";
+-  more.className = "j-outline-toolbar-button toolbar-button";
+-  more.innerHTML = ICONS.more;
+-  more.title = getString("outline-more-actions");
+-  more.setAttribute("aria-label", more.title);
+-  more.setAttribute("aria-haspopup", "menu");
+-  more.setAttribute("aria-expanded", "false");
+-  more.setAttribute("aria-controls", "j-outline-more-menu");
+-  const menu = doc.createElement("div");
+-  menu.id = "j-outline-more-menu";
+-  menu.setAttribute("popover", "auto");
+-  menu.setAttribute("role", "menu");
+-  menu.setAttribute("aria-label", more.title);
+-  for (const id of ["j-outline-ai", "j-outline-save-pdf"]) {
+-    const button = toolbar.querySelector<HTMLButtonElement>(`#${id}`)!;
+-    button.setAttribute("role", "menuitem");
+-    const label = doc.createElement("span");
+-    label.textContent = button.title;
+-    button.append(label);
+-    button.addEventListener("click", () => menu.hidePopover());
+-    menu.append(button);
+-  }
+-  toolbar.append(more, menu);
+-  more.addEventListener("click", (event) => {
+-    if (menu.matches(":popover-open")) {
+-      menu.hidePopover();
+-      return;
+-    }
+-    menu.showPopover();
+-    const anchor = more.getBoundingClientRect();
+-    const bounds = menu.getBoundingClientRect();
+-    const win = doc.defaultView!;
+-    menu.style.left = `${Math.max(8, Math.min(anchor.right - bounds.width, win.innerWidth - bounds.width - 8))}px`;
+-    menu.style.top = `${Math.max(8, Math.min(anchor.bottom + 4, win.innerHeight - bounds.height - 8))}px`;
+-    // Keyboard activation has no pointer click count. Mouse users keep focus
+-    // on the trigger instead of immediately highlighting the first menu item.
+-    if (event.detail === 0) {
+-      menu.querySelector<HTMLButtonElement>("button")?.focus();
+-    }
+-  });
+-  more.addEventListener("keydown", (event) => {
+-    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+-    event.preventDefault();
+-    if (!menu.matches(":popover-open")) more.click();
+-    const selector =
+-      event.key === "ArrowDown" ? "button:first-child" : "button:last-child";
+-    menu.querySelector<HTMLButtonElement>(selector)?.focus();
+-  });
+-  menu.addEventListener("toggle", () => {
+-    more.setAttribute("aria-expanded", String(menu.matches(":popover-open")));
+-  });
+-  menu.addEventListener("keydown", (event) => {
+-    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+-    event.preventDefault();
+-    const buttons = Array.from(
+-      menu.querySelectorAll<HTMLButtonElement>("button"),
+-    );
+-    const index = buttons.indexOf(doc.activeElement as HTMLButtonElement);
+-    const next =
+-      event.key === "Home"
+-        ? 0
+-        : event.key === "End"
+-          ? buttons.length - 1
+-          : (index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) %
+-            buttons.length;
+-    (buttons[next] as HTMLButtonElement | undefined)?.focus();
+-  });
++  // Reserve a permanent column for save and AI. Secondary tools wrap within
++  // the remaining space instead of pushing either primary command offscreen.
++  const primaryActions = doc.createElement("div");
++  primaryActions.className =
++    "j-outline-toolbar-actions j-outline-toolbar-primary";
++  primaryActions.append(
++    toolbar.querySelector("#j-outline-save-pdf")!,
++    toolbar.querySelector("#j-outline-ai")!,
++  );
++  const secondaryActions = doc.createElement("div");
++  secondaryActions.className =
++    "j-outline-toolbar-actions j-outline-toolbar-secondary";
++  secondaryActions.append(...Array.from(toolbar.children));
++  toolbar.append(secondaryActions, primaryActions);
+   const treeContainer = ztoolkit.UI.createElement(doc, "div", {
+     id: "jasminum-outline",
+     classList: ["hidden"], // 默认隐藏
+@@ -227,9 +177,164 @@ export function renderTree(
+     .getElementById("sidebarContainer")!
+     .insertBefore(toolbar, doc.getElementById("sidebarContent")!);
+   treeContainer.appendChild(dropIndicator);
+-  toolbar
+-    .querySelector("#j-outline-ai")
+-    ?.addEventListener("click", () => openOutlineTask(reader._item));
++  // 非模态状态反馈：旋转图标 + 本页数进度；识别成功时自动还原。
++  const aiButton = toolbar.querySelector<HTMLButtonElement>("#j-outline-ai");
++  if (aiButton) {
++    const statusRow = doc.createElement("div");
++    statusRow.className = "j-outline-ai-status";
++    statusRow.hidden = true;
++    const status = doc.createElement("span");
++    status.className = "j-outline-ai-progress";
++    status.hidden = true;
++    status.setAttribute("aria-live", "off");
++    statusRow.append(status);
++    toolbar.append(statusRow);
++
++    if (!doc.getElementById("j-outline-ai-progress-style")) {
++      const style = doc.createElement("style");
++      style.id = "j-outline-ai-progress-style";
++      style.textContent = `
++        #j-outline-toolbar .j-outline-ai-status[hidden] { display: none !important; }
++        #j-outline-toolbar .j-outline-ai-status {
++          grid-column: 1 / -1;
++          display: flex;
++          align-items: center;
++          gap: 6px;
++          min-width: 0;
++        }
++        #j-outline-toolbar #j-outline-ai-pause[hidden] { display: none !important; }
++        @keyframes jasminum-ai-spin { to { transform: rotate(360deg); } }
++        #j-outline-toolbar #j-outline-ai.j-outline-ai-busy svg {
++          animation: jasminum-ai-spin 1.1s linear infinite;
++        }
++        #j-outline-toolbar .j-outline-ai-progress:not([hidden]) {
++          display: inline-block;
++          flex: 0 1 auto;
++          min-width: 0;
++          white-space: nowrap;
++          line-height: 24px;
++          overflow: hidden;
++          text-overflow: ellipsis;
++          font-size: 11px;
++          color: var(--accent-blue, #2675ba);
++        }
++        #j-outline-toolbar #j-outline-ai.j-outline-ai-busy {
++          color: var(--accent-blue, #2675ba);
++          cursor: progress;
++        }
++      `;
++      doc.head.append(style);
++    }
++
++    const iconHTML = aiButton.innerHTML;
++    const defaultTitle = aiButton.title;
++    let working = false;
++    let outcome: string | undefined;
++    const pauseButton = doc.createElement("button");
++    pauseButton.id = "j-outline-ai-pause";
++    pauseButton.type = "button";
++    pauseButton.className = "j-outline-toolbar-button toolbar-button";
++    pauseButton.innerHTML = ICONS.pause;
++    pauseButton.setAttribute("aria-label", "暂停 AI 大纲识别");
++    pauseButton.title =
++      "暂停本篇识别，保留当前会话中已完成的页面；再次点 AI 可继续";
++    pauseButton.hidden = true;
++    pauseButton.addEventListener("click", async () => {
++      if (await pauseOutlineTask(reader._item)) {
++        pauseButton.disabled = true;
++        show("正在暂停", "正在停止识别，已完成页保留；当前请求可能已产生用量");
++      }
++    });
++    statusRow.prepend(pauseButton);
++    const show = (label: string, details: string) => {
++      if (!aiButton.isConnected) return;
++      statusRow.hidden = false;
++      status.hidden = false;
++      status.textContent = label;
++      status.title = details;
++      aiButton.title = details;
++      aiButton.setAttribute("aria-label", details);
++    };
++    aiButton.addEventListener("click", async () => {
++      if (working) return;
++      working = true;
++      outcome = undefined;
++      pauseButton.hidden = false;
++      pauseButton.disabled = false;
++      aiButton.disabled = true;
++      aiButton.classList.add("j-outline-ai-busy");
++      aiButton.setAttribute("aria-busy", "true");
++      aiButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg"
++        viewBox="0 0 24 24" fill="none" stroke="currentColor"
++        stroke-width="1.5" stroke-linecap="round" aria-hidden="true">
++        <path d="M21 12a9 9 0 1 1-9-9"/></svg>`;
++      show("准备中", "AI 大纲识别：正在准备 PDF 页面");
++      try {
++        outcome = await openOutlineTask(reader._item, (progress) => {
++          pauseButton.disabled = progress.phase === "saving";
++          const labels = {
++            preparing: "准备中",
++            local: "本地识别",
++            contents: "目录识别",
++            calibrating: "页码校准",
++            verifying: "抽样验证",
++            full: "全文识别",
++            saving: "保存中",
++          };
++          const phase = labels[progress.phase];
++          const ratio = progress.pdfTotal
++            ? (((progress.uniquePages ?? 0) / progress.pdfTotal) * 100).toFixed(
++                1,
++              )
++            : "0.0";
++          const usage = `AI ${progress.requests ?? 0} 次 · 图片 ${progress.imagePages ?? 0} 页（去重 ${progress.uniquePages ?? 0}/${progress.pdfTotal ?? 0}，${ratio}%）· 本地 ${progress.localPages ?? 0} 页`;
++          const token =
++            progress.tokens?.total_tokens === undefined
++              ? "token：接口未提供"
++              : `token：${progress.tokens.total_tokens}`;
++          show(
++            `${phase} · ${progress.requests ?? 0} 次 · ${progress.uniquePages ?? 0} 图`,
++            `${phase}：${progress.completed}/${progress.total} 任务页；${usage}；${token}`,
++          );
++        });
++      } finally {
++        working = false;
++        aiButton.disabled = false;
++        aiButton.classList.remove("j-outline-ai-busy");
++        aiButton.removeAttribute("aria-busy");
++        aiButton.innerHTML = iconHTML;
++        aiButton.title = defaultTitle;
++        aiButton.setAttribute("aria-label", defaultTitle);
++        pauseButton.hidden = true;
++        if (outcome === "paused") {
++          show(
++            "已暂停 · 点 AI 继续",
++            status.title +
++              "；成功页已缓存；若达到请求上限，再次点 AI 即增加设置中的一组额度，允许继续全文识别。",
++          );
++        } else if (outcome === "saved") {
++          show(
++            "已保存 · " + status.textContent?.replace(/^[^·]+ · /, ""),
++            status.title + "；PDF 与茉莉花大纲已保存，可点击跳转。",
++          );
++        } else if (outcome === "preserved") {
++          show(
++            "已保留现有大纲",
++            "检查到已有大纲，未重复识别或覆盖；0 次 AI 请求。",
++          );
++        } else if (outcome === "failed") {
++          show(
++            "失败 · 点 AI 重试",
++            status.title + "；成功页已缓存，保存失败时会优先重试写入。",
++          );
++        } else {
++          status.hidden = true;
++          statusRow.hidden = true;
++          status.textContent = "";
++        }
++      }
++    });
++  }
+   createTreeNodes(data, treeContainer.querySelector("#root-list")!, doc);
+   doc.querySelector("#sidebarContent")?.appendChild(treeContainer);
+ 
+@@ -331,6 +436,9 @@ async function initializeOutline(reader: _ZoteroTypes.ReaderInstance) {
+     ztoolkit.log("Outline is already added, skip.");
+     return;
+   }
++  // Open each new PDF in the outline view, even when Zotero last hid its sidebar.
++  // Existing readers return above so later manual view changes are respected.
++  reader.toggleSidebar(true);
+   // 等待元素加载
+   await wait.waitUtilAsync(
+     () => {
+@@ -374,6 +482,9 @@ async function initializeOutline(reader: _ZoteroTypes.ReaderInstance) {
+   renderBookmarkTree(reader, doc, bookmarks);
+   initEventListener(reader, doc);
+   followOutlinePages(reader, doc);
++  // Reuse the normal tab handler to update the reader state, panels and toolbar.
++  doc.getElementById("j-outline-button")!.click();
++  void autoRecognizeOutline(reader, doc);
+ }
+ 
+ export async function registerOutline(tabID: string) {
+@@ -404,8 +515,8 @@ export async function registerOutline(tabID: string) {
+     );
+     // ztoolkit.log("registerOutline", new Date().toISOString());
+     ztoolkit.log("Sidebar toggle button is ready.");
+-    // Sidebar is already opened, add outline.
+-    if (doc && doc.getElementById("sidebarContainer")) {
++    // Initialization opens the sidebar before adding and selecting the outline.
++    if (doc) {
+       await addOutlineToReader(reader);
+     }
+     // Click toggle button to open sidebar.
+diff --git a/src/modules/outline/localTOC.ts b/src/modules/outline/localTOC.ts
+new file mode 100644
+index 0000000..337c56f
+--- /dev/null
++++ b/src/modules/outline/localTOC.ts
+@@ -0,0 +1,188 @@
++import {
++  compact,
++  locateHeading,
++  type LocatedHeading,
++  type OutlinePDFDocument,
++  type TextItem,
++} from "./heading";
++import type { ContentsCandidate, ContentsEntry } from "./tocAgent";
++
++/** Geometry is retained in memory only; no body text or images are persisted. */
++export class LocalOutlineReader {
++  readonly pages = new Map<number, Promise<TextItem[]>>();
++  constructor(
++    private pdf: OutlinePDFDocument,
++    private check: () => void,
++  ) {}
++  read(page: number) {
++    this.check();
++    if (!this.pages.has(page))
++      this.pages.set(
++        page,
++        this.pdf
++          .getPage(page)
++          .then((p) => p.getTextContent())
++          .then((c) =>
++            c.items.filter(
++              (i): i is TextItem =>
++                "str" in i &&
++                i.transform.length === 6 &&
++                i.transform.every(Number.isFinite),
++            ),
++          ),
++      );
++    return this.pages.get(page)!;
++  }
++  async lines(page: number) {
++    const items = await this.read(page);
++    this.check();
++    const rows: { y: number; items: TextItem[] }[] = [];
++    for (const item of items) {
++      let row = rows.find((r) => Math.abs(r.y - item.transform[5]) < 2);
++      if (!row) {
++        row = { y: item.transform[5], items: [] };
++        rows.push(row);
++      }
++      row.items.push(item);
++    }
++    return rows
++      .sort((a, b) => b.y - a.y)
++      .map((r) => {
++        r.items.sort((a, b) => a.transform[4] - b.transform[4]);
++        return {
++          text: r.items
++            .map((i) => i.str)
++            .join(" ")
++            .normalize("NFKC")
++            .trim(),
++          x: r.items[0].transform[4],
++        };
++      });
++  }
++  async contents(limit: number): Promise<ContentsCandidate | null> {
++    let start = 0,
++      end = 0,
++      uncertain = false;
++    const entries: (ContentsEntry & { x: number })[] = [];
++    for (let p = 1; p <= Math.min(limit, this.pdf.numPages); p++) {
++      const lines = await this.lines(p);
++      const marker = lines.some((l) =>
++        /^(目录|目次|contents|tableofcontents)$/i.test(compact(l.text)),
++      );
++      if (!start && !marker) continue;
++      if (!start) start = p;
++      const parsed: typeof entries = [];
++      let pageUncertain = false;
++      for (const { text, x } of lines) {
++        if (/^(目录|目次|contents|tableofcontents)$/i.test(compact(text)))
++          continue;
++        const match = text.match(
++          /^(.+?)(?:[.·…‥]{2,}|\s+)([0-9]{1,5}|[ivxlcdm]+)\s*$/i,
++        );
++        if (!match) {
++          // A wrapped or unreadable numbered row makes the local fast path unsafe.
++          if (
++            /^(第.+[章节篇]|\d+[.、]|[一二三四五六七八九十]+、)/.test(
++              compact(text),
++            )
++          )
++            pageUncertain = true;
++          continue;
++        }
++        const title = match[1]
++          .replace(/[.·…‥\s]+$/g, "")
++          .replace(/\s*([、，。；：])\s*/g, "$1")
++          .trim();
++        if (title.length < 2 || title.length > 500) continue;
++        // Two-column rows and concatenated destinations are delegated to vision.
++        if (/\s\d+\s+\S/.test(title)) pageUncertain = true;
++        const normalized = compact(title);
++        let level =
++          /^第.+[章篇编]/.test(normalized) || /^chapter\b/i.test(title)
++            ? 1
++            : /^第.+节/.test(normalized)
++              ? 2
++              : /^[（(][一二三四五六七八九十]+[）)]/.test(normalized)
++                ? 4
++                : /^[一二三四五六七八九十]+、/.test(normalized)
++                  ? 3
++                  : /^\d+(?:\.\d+)+/.test(normalized)
++                    ? normalized.match(/^\d+(?:\.\d+)+/)![0].split(".").length
++                    : /^\d+[.、\s]/.test(title)
++                      ? 1
++                      : 0;
++        parsed.push({ title, level, pageLabel: match[2], x });
++      }
++      if (parsed.length) {
++        uncertain ||= pageUncertain;
++        entries.push(...parsed);
++        end = p;
++      } else if (p > start && entries.length >= 2) {
++        if (uncertain) return null;
++        const indents = [
++          ...new Set(entries.map((e) => Math.round(e.x / 8) * 8)),
++        ].sort((a, b) => a - b);
++        if (indents.length > 7) return null;
++        for (const e of entries)
++          if (!e.level) e.level = indents.indexOf(Math.round(e.x / 8) * 8) + 1;
++        return {
++          entries: entries.map(({ x, ...e }) => e),
++          endPage: end,
++          startPage: start,
++        };
++      }
++    }
++    // A list touching the probe boundary has not been shown to be complete.
++    return null;
++  }
++  async resolve(
++    candidate: ContentsCandidate,
++  ): Promise<LocatedHeading[] | null> {
++    // Match complete lines rather than mentions in body paragraphs or TOC rows.
++    // Direct destinations handle Roman matter, numbering resets and local shifts.
++    const samples = [
++      candidate.endPage + 1,
++      Math.ceil(this.pdf.numPages / 2),
++      this.pdf.numPages,
++    ].filter((p) => p <= this.pdf.numPages);
++    if (
++      (await Promise.all(samples.map((p) => this.read(p)))).every(
++        (items) => items.length === 0,
++      ) &&
++      (await Promise.all(this.pages.values())).every(
++        (items) => items.length === 0,
++      )
++    )
++      return null;
++    const targets = new Set(candidate.entries.map((e) => compact(e.title)));
++    const matches = new Map<string, number[]>();
++    for (let p = 1; p <= this.pdf.numPages; p++) {
++      if (p >= (candidate.startPage ?? 1) && p <= candidate.endPage) continue;
++      for (const line of await this.lines(p)) {
++        const key = compact(line.text);
++        if (targets.has(key)) {
++          const found = matches.get(key) ?? [];
++          if (!found.includes(p)) found.push(p);
++          matches.set(key, found);
++        }
++      }
++    }
++    const result: LocatedHeading[] = [];
++    let previous = 0;
++    for (const entry of candidate.entries) {
++      const pages = matches.get(compact(entry.title)) ?? [];
++      if (pages.length !== 1 || pages[0] < previous) return null;
++      previous = pages[0];
++      const page = await this.pdf.getPage(previous);
++      result.push(
++        locateHeading(
++          { ...entry, left: 0, top: 0 },
++          previous,
++          page,
++          await this.read(previous),
++        ),
++      );
++    }
++    return result;
++  }
++}
+diff --git a/src/modules/outline/pdfAdapter.ts b/src/modules/outline/pdfAdapter.ts
+index b85cf72..0638de1 100644
+--- a/src/modules/outline/pdfAdapter.ts
++++ b/src/modules/outline/pdfAdapter.ts
+@@ -60,8 +60,7 @@ export async function adaptOutlinePDFDocument(
+   filePath: string,
+ ): Promise<OutlinePDFDocument> {
+   const pages = await readPageGeometries(filePath);
+-  let cachedStart = -1;
+-  let batch: Promise<unknown[]>;
++  const batches = new Map<number, Promise<unknown[]>>();
+   return {
+     numPages: pages.length,
+     async getPage(pageNumber): Promise<OutlinePDFPage> {
+@@ -72,17 +71,17 @@ export async function adaptOutlinePDFDocument(
+         getViewport: () => geometryViewport(geometry),
+         async getTextContent() {
+           const start = Math.floor((pageNumber - 1) / 5) * 5;
+-          if (cachedStart !== start) {
+-            cachedStart = start;
++          if (!batches.has(start)) {
+             const pageIndexes = Array.from(
+               { length: Math.min(5, pages.length - start) },
+               (_, i) => start + i,
+             );
+-            batch = outlineJob<ArrayBuffer>("textPDF", filePath, {
++            const batch = outlineJob<ArrayBuffer>("textPDF", filePath, {
+               pageIndexes,
+             }).then(readTextPages);
++            batches.set(start, batch);
+           }
+-          const results = await batch;
++          const results = await batches.get(start)!;
+           return {
+             items: textItemsFromRecognizer(
+               results[pageNumber - 1 - start],
+diff --git a/src/modules/outline/recognitionAgent.ts b/src/modules/outline/recognitionAgent.ts
+index 4b1e0e2..e9fed82 100644
+--- a/src/modules/outline/recognitionAgent.ts
++++ b/src/modules/outline/recognitionAgent.ts
+@@ -1,3 +1,5 @@
++import { LocalOutlineReader } from "./localTOC";
++import { getPref } from "../../utils/prefs";
+ import { getConfiguredLLMClient } from "../../utils/llm";
+ import { renderPDFPagesAsPNG } from "../../utils/pdfImage";
+ import {
+@@ -40,7 +42,8 @@ const contentsPrompt =
+   " Also read pageLabel: the Arabic or Roman page number actually printed in this page's header or footer, as a string; null if absent or unreadable. Never infer it from the PDF index or from numbers in a contents list. For actual document tables of contents (not lists of figures/tables, indexes, running headers or ordinary text), return contents with starts=true ONLY on the first page of that contents block, continues=true when the list continues onto the next page, and all visible entries with title, level and printed destination pageLabel. Preserve Arabic versus Roman numbering, preserve section numbers and language, remove dot leaders, and do not guess missing destination numbers. A translated contents list starts a separate block. On contents pages headings must be empty. On all other pages contents=null. Do not copy contents entries into headings or treat their row positions as chapter positions.";
+ 
+ type Progress = (page: number, total: number, lastPage: number) => void;
+-export type OutlineRecognitionStage = "contents" | "calibrating" | "full";
++export type OutlineRecognitionStage =
++  "local" | "contents" | "calibrating" | "verifying" | "full";
+ 
+ /** One request cache covers probing, calibration and the full-scan fallback. */
+ export class OutlineRecognitionAgent {
+@@ -57,14 +60,115 @@ export class OutlineRecognitionAgent {
+   private controller?: AbortController;
+   private running = false;
+   private progress?: Progress;
+-  private readonly client = getConfiguredLLMClient();
++  readonly mode: "smart" | "full";
++  requests = 0;
++  imagePages = 0;
++  readonly sentPages = new Set<number>();
++  tokens: {
++    prompt_tokens?: number;
++    completion_tokens?: number;
++    total_tokens?: number;
++  } = {};
++  quotaPaused = false;
++  private allowance: number;
++  private localDone = false;
++  private readonly local: LocalOutlineReader;
++  checkpoint?: () => Promise<void>;
++  get localPages() {
++    return this.local.pages.size;
++  }
++  get requestLimit() {
++    return Math.max(
++      1,
++      Math.floor(Number(getPref("outlineRequestLimit")) || 12),
++    );
++  }
++  continueBudget() {
++    this.allowance = this.requests + this.requestLimit;
++    this.quotaPaused = false;
++  }
++  exportCache() {
++    return {
++      version: 1,
++      mode: this.mode,
++      scans: [...this.scans],
++      requests: this.requests,
++      imagePages: this.imagePages,
++      sentPages: [...this.sentPages],
++      tokens: this.tokens,
++      allowance: this.allowance,
++    };
++  }
++  restoreCache(value: ReturnType<OutlineRecognitionAgent["exportCache"]>) {
++    if (
++      value?.version !== 1 ||
++      value.mode !== this.mode ||
++      !Array.isArray(value.scans) ||
++      !Number.isSafeInteger(value.requests) ||
++      value.requests < 0 ||
++      !Number.isSafeInteger(value.imagePages) ||
++      value.imagePages < 0
++    )
++      return;
++    // Stored responses are validated again before use; no credentials/images/body text.
++    for (const [page, scan] of value.scans) {
++      if (
++        !Number.isInteger(page) ||
++        page < 1 ||
++        page > this.pdf.numPages ||
++        scan.page !== page ||
++        !Array.isArray(scan.headings) ||
++        scan.headings.some(
++          (h) =>
++            !h.title ||
++            h.title.length > 500 ||
++            !Number.isInteger(h.level) ||
++            h.level < 1 ||
++            h.level > 7 ||
++            !Number.isFinite(h.left) ||
++            h.left < 0 ||
++            h.left > 1 ||
++            !Number.isFinite(h.top) ||
++            h.top < 0 ||
++            h.top > 1,
++        )
++      )
++        return;
++      if (
++        scan.contents &&
++        (!Array.isArray(scan.contents.entries) ||
++          scan.contents.entries.some(
++            (e) =>
++              typeof e.title !== "string" ||
++              !e.title ||
++              e.title.length > 500 ||
++              !Number.isInteger(e.level) ||
++              e.level < 1 ||
++              e.level > 7 ||
++              typeof e.pageLabel !== "string",
++          ))
++      )
++        return;
++    }
++    this.scans = new Map(value.scans);
++    this.requests = value.requests;
++    this.imagePages = value.imagePages;
++    for (const page of value.sentPages ?? [])
++      if (Number.isInteger(page) && page >= 1 && page <= this.pdf.numPages)
++        this.sentPages.add(page);
++    this.tokens = value.tokens ?? {};
++    this.allowance = Math.max(this.requestLimit, Number(value.allowance) || 0);
++  }
+   constructor(
+     private readonly attachmentID: number,
+     readonly pdf: OutlinePDFDocument,
+   ) {
+-    this.probeLimit = Math.min(15, pdf.numPages);
+-    this.contentsFinished = pdf.numPages <= 15;
+-    this.stage = this.contentsFinished ? "full" : "contents";
++    this.mode = getPref("outlineRecognitionMode") === "full" ? "full" : "smart";
++    this.allowance = this.requestLimit;
++    this.local = new LocalOutlineReader(pdf, () => this.check());
++    this.probeLimit = Math.min(5, pdf.numPages);
++    this.contentsFinished = this.mode === "full";
++    this.stage = "local";
+     this.pageProgress = {
+       completed: 0,
+       total: this.contentsFinished ? pdf.numPages : this.probeLimit,
+@@ -104,6 +208,12 @@ export class OutlineRecognitionAgent {
+       (page) => !this.scans.has(page),
+     );
+     if (missing.length) {
++      if (this.requests >= this.allowance) {
++        this.quotaPaused = true;
++        throw new Error(
++          "AI 请求达到任务上限，已暂停；点击 AI 可明确增加下一组请求额度并继续。",
++        );
++      }
+       const images = await renderPDFPagesAsPNG(
+         this.attachmentID,
+         missing.map((page) => page - 1),
+@@ -146,9 +256,24 @@ export class OutlineRecognitionAgent {
+             additionalProperties: false,
+           },
+         });
+-      const result = await this.client.createJSONCompletion<{
++      const client = getConfiguredLLMClient(); // Local success never needs configured AI.
++      this.requests++;
++      this.imagePages += missing.length;
++      missing.forEach((p) => this.sentPages.add(p));
++      await this.checkpoint?.(); // Count dispatched attempts, including failures/restarts.
++      this.report(this.pageProgress.completed, this.pageProgress.total);
++      const result = await client.createJSONCompletion<{
+         pages: OutlineScanPage[];
+       }>({
++        onUsage: (usage) => {
++          for (const key of [
++            "prompt_tokens",
++            "completion_tokens",
++            "total_tokens",
++          ] as const)
++            if (typeof usage[key] === "number")
++              this.tokens[key] = (this.tokens[key] ?? 0) + usage[key]!;
++        },
+         systemPrompt: bodyPrompt + (contents ? contentsPrompt : ""),
+         prompt: `Images correspond, in order, to physical PDF pages ${missing.join(", ")}. Earlier headings (context only, do not repeat): ${JSON.stringify(this.headings.slice(-20).map(({ title, level }) => ({ title, level })))}. Return pages and headings in reading order.`,
+         images: ordered.map((image) => ({ ...image, detail: "high" as const })),
+@@ -174,7 +299,6 @@ export class OutlineRecognitionAgent {
+           },
+         },
+       });
+-      this.check();
+       const validTitle = (heading: { title: string; level: number }) =>
+         typeof heading.title === "string" &&
+         !!heading.title.trim() &&
+@@ -220,10 +344,13 @@ export class OutlineRecognitionAgent {
+         throw new Error("Invalid outline pages, headings or coordinates");
+       // Cache only complete, validated responses, including the fallback's headings.
+       for (const page of result.pages) this.scans.set(page.page, page);
++      await this.checkpoint?.();
++      this.check();
+     }
+     return pageNumbers.map((page) => this.scans.get(page)!);
+   }
+   private async inspect(pages: number[]) {
++    this.stage = "verifying";
+     const missing = pages.filter((page) => !this.scans.has(page)).length;
+     this.report(this.scans.size, this.scans.size + missing);
+     const result = await this.readPages(pages, true);
+@@ -238,44 +365,71 @@ export class OutlineRecognitionAgent {
+     this.progress = progress;
+     try {
+       this.controller = new (Zotero.getMainWindow().AbortController)();
++      if (!this.localDone && this.mode === "smart") {
++        this.stage = "local";
++        this.report(0, Math.min(30, this.pdf.numPages));
++        // Unsupported text layouts go to vision. A worker failure is shown, not silently billed.
++        const candidate = await this.local.contents(30);
++        if (candidate) {
++          this.stage = "calibrating";
++          this.report(this.localPages, this.localPages);
++          const headings = await this.local.resolve(candidate);
++          if (headings) {
++            this.headings.splice(0, this.headings.length, ...headings);
++            this.usedContents = true;
++            this.complete = true;
++            this.report(this.localPages, this.localPages);
++            return true;
++          }
++        }
++        this.localDone = true;
++      }
+       while (true) {
+         this.check();
+         if (!this.contentsFinished && this.nextPage > this.probeLimit) {
+-          const atBoundary = !!this.scans.get(this.probeLimit)?.contents;
+-          if (atBoundary && this.probeLimit < Math.min(30, this.pdf.numPages)) {
+-            this.probeLimit = Math.min(
+-              this.probeLimit + 5,
+-              30,
+-              this.pdf.numPages,
+-            );
+-          } else {
+-            const candidate = atBoundary
+-              ? null
+-              : findContentsCandidate(this.scans, this.probeLimit);
+-            if (candidate) {
+-              this.stage = "calibrating";
++          const candidate = findContentsCandidate(this.scans, this.probeLimit);
++          if (candidate) {
++            this.stage = "calibrating";
++            this.report(this.scans.size, this.scans.size);
++            let headings = await this.local.resolve(candidate);
++            if (!headings) {
++              const textPDF: OutlinePDFDocument = {
++                numPages: this.pdf.numPages,
++                getPage: async (pageNumber) => {
++                  const page = await this.pdf.getPage(pageNumber);
++                  return {
++                    getViewport: (options) => page.getViewport(options),
++                    getTextContent: async () => ({
++                      items: await this.local.read(pageNumber),
++                    }),
++                  };
++                },
++              };
+               const toc = new TOCRecognitionAgent(
+-                this.pdf,
++                textPDF,
+                 this.scans,
+                 (pages) => this.inspect(pages),
+               );
+-              const headings = await toc.resolve(
+-                candidate,
+-                this.controller!.signal,
+-              );
+-              this.check();
+-              if (headings) {
+-                this.headings.splice(0, this.headings.length, ...headings);
+-                this.usedContents = true;
+-                this.complete = true;
+-                this.report(this.scans.size, this.scans.size);
+-                return true;
+-              }
++              headings = await toc.resolve(candidate, this.controller!.signal);
++            }
++            this.check();
++            if (headings) {
++              this.headings.splice(0, this.headings.length, ...headings);
++              this.usedContents = true;
++              this.complete = true;
++              this.report(this.scans.size, this.scans.size);
++              return true;
+             }
+             this.contentsFinished = true;
+-            this.stage = "full";
+-          }
++          } else if (this.probeLimit < Math.min(30, this.pdf.numPages)) {
++            this.probeLimit = Math.min(
++              this.probeLimit + 5,
++              30,
++              this.pdf.numPages,
++            );
++          } else this.contentsFinished = true;
+         }
++        this.stage = this.contentsFinished ? "full" : "contents";
+         if (this.nextPage > this.pdf.numPages) {
+           this.complete = true;
+           this.report(this.pdf.numPages, this.pdf.numPages);
+@@ -299,13 +453,7 @@ export class OutlineRecognitionAgent {
+           const page = await this.pdf.getPage(scan.page);
+           let items: TextItem[] = [];
+           try {
+-            const content = await page.getTextContent();
+-            items = content.items.filter(
+-              (i): i is TextItem =>
+-                "str" in i &&
+-                i.transform.length === 6 &&
+-                i.transform.every(Number.isFinite),
+-            );
++            items = await this.local.read(scan.page);
+           } catch {
+             /* Image-only PDFs use visual coordinates. */
+           }
+@@ -326,12 +474,16 @@ export class OutlineRecognitionAgent {
+         this.pageProgress.completed = lastPage;
+       }
+     } catch (error) {
+-      if (this.stopped) return false;
++      if (this.stopped || this.quotaPaused) return false;
+       throw error;
+     } finally {
+-      this.controller = undefined;
+-      this.running = false;
+-      this.progress = undefined;
++      try {
++        await this.checkpoint?.();
++      } finally {
++        this.controller = undefined;
++        this.running = false;
++        this.progress = undefined;
++      }
+     }
+   }
+ }
+diff --git a/src/modules/outline/safeState.ts b/src/modules/outline/safeState.ts
+new file mode 100644
+index 0000000..85c2bf3
+--- /dev/null
++++ b/src/modules/outline/safeState.ts
+@@ -0,0 +1,80 @@
++import { writePDFOutline } from "./savePDF";
++import { saveOutlineToJSON } from "./outline";
++
++export async function fileIdentity(path: string) {
++  const before = await IOUtils.stat(path);
++  const digest = await Zotero.Utilities.Internal.md5Async(path);
++  const after = await IOUtils.stat(path);
++  if (before.size !== after.size || before.lastModified !== after.lastModified)
++    throw new Error("PDF 正在被其他进程修改，请稍后重试。");
++  if (typeof after.size !== "number" || typeof after.lastModified !== "number")
++    throw new Error("PDF 文件状态不可用");
++  return { size: after.size, modified: after.lastModified, digest };
++}
++export type FileIdentity = Awaited<ReturnType<typeof fileIdentity>>;
++export const sameFile = (a: FileIdentity, b: FileIdentity) =>
++  a.size === b.size && a.modified === b.modified && a.digest === b.digest;
++export function statePath(item: Zotero.Item) {
++  return PathUtils.join(
++    Zotero.DataDirectory.dir,
++    "storage",
++    item.key,
++    "jasminum-ai-cache.json",
++  );
++}
++
++/** Backups never replace previous generations. Roll back only our own PDF bytes. */
++export async function safeSaveOutline(
++  item: Zotero.Item,
++  nodes: OutlineNode[],
++  expected: FileIdentity,
++) {
++  const path = await item.getFilePathAsync();
++  if (!path || !sameFile(expected, await fileIdentity(path)))
++    throw new Error(
++      "PDF 自识别开始后已改变，停止保存；请重新打开文献后再识别。",
++    );
++  const dir = PathUtils.join(PathUtils.parent(path)!, "jasminum-ai-backups");
++  await IOUtils.makeDirectory(dir, { ignoreExisting: true });
++  const id = `${Date.now()}-${Zotero.Utilities.randomString()}`;
++  const backup = PathUtils.join(dir, `${id}.pdf`);
++  const sidecar = PathUtils.join(
++    Zotero.DataDirectory.dir,
++    "storage",
++    item.key,
++    "jasminum-outline.json",
++  );
++  const jsonBackup = PathUtils.join(dir, `${id}.json`);
++  await IOUtils.copy(path, backup, { noOverwrite: true });
++  const hadJSON = await IOUtils.exists(sidecar);
++  if (hadJSON) await IOUtils.copy(sidecar, jsonBackup, { noOverwrite: true });
++  if (!sameFile(expected, await fileIdentity(path)))
++    throw new Error("备份期间 PDF 已改变，停止保存。");
++  let written: FileIdentity | undefined;
++  try {
++    await writePDFOutline(item, nodes, {
++      size: expected.size,
++      modified: expected.modified,
++    });
++    written = await fileIdentity(path);
++    await saveOutlineToJSON(item, nodes);
++    return written;
++  } catch (error) {
++    if (written && sameFile(written, await fileIdentity(path))) {
++      await IOUtils.write(path, await IOUtils.read(backup), {
++        tmpPath: `${path}.jasminum-restore.tmp`,
++      });
++      if (hadJSON)
++        await IOUtils.write(sidecar, await IOUtils.read(jsonBackup), {
++          tmpPath: `${sidecar}.restore.tmp`,
++        });
++      else await IOUtils.remove(sidecar, { ignoreAbsent: true });
++    }
++    throw new Error(
++      `大纲保存失败：${error instanceof Error ? error.message : "文件写入错误"}。原件备份保留在 ${backup}。请重试保存。`,
++      {
++        cause: error,
++      },
++    );
++  }
++}
+diff --git a/src/modules/outline/savePDF.ts b/src/modules/outline/savePDF.ts
+index 190c293..f29c4e0 100644
+--- a/src/modules/outline/savePDF.ts
++++ b/src/modules/outline/savePDF.ts
+@@ -2,14 +2,20 @@
+ export async function writePDFOutline(
+   item: Zotero.Item,
+   outlineNodes: OutlineNode[],
++  expectedFile?: { size: number; modified: number },
+ ): Promise<void> {
+   const filePath = await item.getFilePathAsync();
+   if (!filePath) throw new Error("PDF file is missing");
+   const worker = new Worker(
+     "chrome://jasminum/content/scripts/jasminum-worker.js",
+   );
++  let timer: ReturnType<typeof setTimeout> | undefined;
+   try {
+     await new Promise<void>((resolve, reject) => {
++      timer = setTimeout(
++        () => reject(new Error("PDF 保存超时，请检查文件占用并重试。")),
++        120000,
++      );
+       const jobID = Zotero.Utilities.randomString();
+       worker.onmessage = (event: Event) => {
+         const data = (event as MessageEvent).data;
+@@ -29,9 +35,11 @@ export async function writePDFOutline(
+         jobID,
+         filePath,
+         outlineNodes,
++        expectedFile,
+       });
+     });
+   } finally {
++    clearTimeout(timer);
+     worker.terminate();
+   }
+ }
+diff --git a/src/modules/outline/style.ts b/src/modules/outline/style.ts
+index b33d10d..7bba129 100644
+--- a/src/modules/outline/style.ts
++++ b/src/modules/outline/style.ts
+@@ -1,4 +1,5 @@
+ export const ICONS = {
++  pause: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>`,
+   outlineDelete: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h3m3 0h3M4 5v14m0-7h5m3 0h2M4 19h5m3 0h2"/><path d="M16 6h6"/></svg>`,
+   outlineAdd: `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h3m3 0h3M4 5v14m0-7h5m3 0h2M4 19h5m3 0h2"/><path d="M19 3v6m-3-3h6"/></svg>`,
+   more: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true"><g fill="currentColor"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></g></svg>`,
+@@ -77,14 +78,34 @@ export const outline_css = `
+ display: none !important;}
+ 
+ #j-outline-toolbar {
+-  display: flex;
+-  align-items: center;
+-  gap: 4px;
+-  padding: 4px 4px 4px 8px;
++  display: grid;
++  grid-template-columns: minmax(0, 1fr) max-content;
++  align-items: start;
++  column-gap: 4px;
++  row-gap: 4px;
++  min-width: 0;
++  box-sizing: border-box;
++  padding: 4px;
+   border-top: 1px solid #ddd;
+   border-bottom: 1px solid #ddd;
+ }
+ 
++.j-outline-toolbar-actions {
++  display: flex;
++  align-items: center;
++  gap: 2px;
++  min-width: 0;
++}
++
++.j-outline-toolbar-secondary {
++  flex-wrap: wrap;
++}
++
++.j-outline-toolbar-primary {
++  flex-wrap: nowrap;
++  justify-self: end;
++}
++
+ .j-outline-toolbar-button {
+   padding: 0;
+   margin: 0;
+@@ -95,57 +116,41 @@ display: none !important;}
+ 
+ .j-outline-toolbar-button svg {
+   display: block;
+-  width: 20px;
+-  height: 20px;
++  width: 18px;
++  height: 18px;
+ }
+ 
+ button:hover.j-outline-toolbar-button {
+   background: var(--fill-quinary, var(--button-hover-bg));
+ }
+ 
+-#j-outline-toolbar > button { flex: 0 0 28px; border-radius: 4px; }
+-#j-outline-toolbar #j-outline-more { margin-inline-start: auto; }
+-#j-outline-more-menu {
+-  position: fixed;
+-  margin: 0;
+-  padding: 4px;
+-  min-width: 180px;
+-  max-width: calc(100vw - 16px);
+-  box-sizing: border-box;
+-  border: 1px solid var(--border-color);
+-  border-radius: 6px;
+-  background: var(--container-bg);
+-  color: var(--text-color);
+-  box-shadow: 0 4px 16px var(--shadow-color);
+-}
+-#j-outline-more-menu button {
++#j-outline-toolbar .j-outline-toolbar-actions > button,
++#j-outline-toolbar .j-outline-ai-status > button {
++  flex: 0 0 24px;
++  min-width: 24px;
++  height: 24px;
+   display: flex;
+   align-items: center;
+-  justify-content: flex-start;
+-  box-sizing: border-box;
+-  gap: 8px;
+-  width: 100%;
+-  padding: 7px 10px;
++  justify-content: center;
+   border-radius: 4px;
+-  text-align: start;
+-  color: inherit;
+ }
+-/* Match Zotero's 20px icons: 1.5 SVG units on a 24-unit viewBox = 1.25px. */
++/* Keep view tabs aligned with Zotero and action icons uniformly compact. */
+ #j-outline-button svg,
+-#j-bookmark-button svg,
+-.j-outline-toolbar-button svg,
+-.j-bookmark-toolbar-button svg {
++#j-bookmark-button svg {
+   width: 20px;
+   height: 20px;
+   color: var(--fill-secondary, #808080);
+ }
+-#j-outline-more-menu button svg { flex: none; width: 20px; height: 20px; }
++.j-outline-toolbar-button svg,
++.j-bookmark-toolbar-button svg {
++  width: 18px;
++  height: 18px;
++  color: var(--fill-secondary, #808080);
++}
+ #j-outline-toolbar > button:active,
+ #j-bookmark-toolbar > button:active {
+   background: var(--fill-quarternary, var(--selected-node-bg));
+ }
+-#j-outline-more-menu button:focus-visible,
+-#j-outline-more:focus-visible { outline: 2px solid Highlight; outline-offset: -2px; }
+ 
+ .tree-container {
+   border: 1px solid var(--border-color);
+diff --git a/src/modules/outline/task.ts b/src/modules/outline/task.ts
+index f815be5..b743086 100644
+--- a/src/modules/outline/task.ts
++++ b/src/modules/outline/task.ts
+@@ -1,4 +1,11 @@
+-import { writePDFOutline } from "./savePDF";
++import {
++  fileIdentity,
++  sameFile,
++  statePath,
++  safeSaveOutline,
++  type FileIdentity,
++} from "./safeState";
++import { outlineJob } from "./background";
+ import { adaptOutlinePDFDocument } from "./pdfAdapter";
+ import { getString } from "../../utils/locale";
+ import {
+@@ -26,13 +33,37 @@ function outlineSnapshot(nodes: OutlineNode[]): string {
+ const t = (key: string) => getString(`outline-ai-${key}`);
+ export class OutlineTask implements Task {
+   readonly type = "outline";
+-  readonly silent = false;
++  readonly silent = true;
+   readonly id: string;
+   message = "";
+   summary = t("queued");
+   private _status: TaskStatus = "waiting";
+   private agent?: OutlineRecognitionAgent;
+   private diskBaseline = "";
++  private fileBaseline?: FileIdentity;
++  private preserved = false;
++  private protectedExisting = false;
++  get quotaPaused() {
++    return this.agent?.quotaPaused ?? false;
++  }
++  continueBudget() {
++    this.agent?.continueBudget();
++  }
++  get recognitionStage() {
++    return this.agent?.stage ?? "local";
++  }
++  get usage() {
++    return {
++      requests: this.agent?.requests ?? 0,
++      imagePages: this.agent?.imagePages ?? 0,
++      uniquePages: this.agent?.sentPages.size ?? 0,
++      localPages: this.agent?.localPages ?? 0,
++      tokens: this.agent?.tokens ?? {},
++    };
++  }
++  get keptExisting() {
++    return this.preserved;
++  }
+   private original: OutlineNode[] = [];
+   private baseline = "";
+   private afterSave = "";
+@@ -141,6 +172,8 @@ export class OutlineTask implements Task {
+           !(await this.item.getFilePathAsync())
+         )
+           throw new Error(t("no-pdf"));
++        const filePath = (await this.item.getFilePathAsync()) || "";
++        this.fileBaseline = await fileIdentity(filePath);
+         const stored = (await getOutlineFromPDF(this.item)) ?? [];
+         this.diskBaseline = outlineSnapshot(stored);
+         const openDoc = this.openReaders()
+@@ -154,6 +187,64 @@ export class OutlineTask implements Task {
+             (await this.item.getFilePathAsync()) || "",
+           ),
+         );
++        const native = await outlineJob<OutlineNode[]>(
++          "nativeOutline",
++          filePath,
++        );
++        if (stored.length || this.original.length || native.length) {
++          // Never silently replace even an incomplete user outline.
++          this.protectedExisting = true;
++          const all = [...stored, ...this.original, ...native];
++          const valid = (nodes: OutlineNode[]): boolean =>
++            nodes.every(
++              (n) =>
++                n.title?.trim() &&
++                Number.isInteger(n.page) &&
++                n.page >= 1 &&
++                n.page <= this.totalPages &&
++                Number.isFinite(n.x) &&
++                Number.isFinite(n.y) &&
++                valid(n.children ?? []),
++            );
++          if (!valid(all))
++            throw new Error("已有大纲含无效跳转，已保留原数据；请先手动检查。");
++          this.preserved = true;
++          this.applied = true;
++          this.summary = "已有有效大纲，已保留（0 次 AI 请求）";
++          this.status = "success";
++          return;
++        }
++        try {
++          const saved = (await IOUtils.readJSON(statePath(this.item))) as {
++            identity: FileIdentity;
++            agent: ReturnType<OutlineRecognitionAgent["exportCache"]>;
++          };
++          if (sameFile(saved.identity, this.fileBaseline))
++            this.agent.restoreCache(saved.agent);
++        } catch {
++          /* No usable checkpoint; never restore across a changed PDF. */
++        }
++        this.agent.checkpoint = async () => {
++          await IOUtils.writeJSON(
++            statePath(this.item),
++            { identity: this.fileBaseline, agent: this.agent!.exportCache() },
++            { tmpPath: statePath(this.item) + ".tmp" },
++          );
++        };
++      }
++      if (this.protectedExisting)
++        throw new Error("已有大纲已保留，请先手动检查，未调用 AI。");
++      if (
++        !sameFile(
++          this.fileBaseline!,
++          await fileIdentity((await this.item.getFilePathAsync()) || ""),
++        )
++      ) {
++        this.agent = undefined;
++        this.fileBaseline = undefined;
++        throw new Error(
++          "PDF 在识别期间已改变；本次结果已停用，再次点 AI 将重新检查文档。",
++        );
+       }
+       if (this.stopping) {
+         this.summary = t("stopped");
+@@ -162,11 +253,15 @@ export class OutlineTask implements Task {
+       }
+       const complete = await this.agent.run((page, total, lastPage) => {
+         this.summary =
+-          this.agent?.stage === "contents"
+-            ? t("contents-check")
+-            : this.agent?.stage === "calibrating"
+-              ? t("contents-calibrating")
+-              : `${t("running")} ${page}–${lastPage ?? page} / ${total}`;
++          this.agent?.stage === "local"
++            ? "本地识别"
++            : this.agent?.stage === "verifying"
++              ? "抽样验证"
++              : this.agent?.stage === "contents"
++                ? t("contents-check")
++                : this.agent?.stage === "calibrating"
++                  ? t("contents-calibrating")
++                  : `${t("running")} ${page}–${lastPage ?? page} / ${total}`;
+         this.notify();
+       });
+       this.summary =
+@@ -184,9 +279,12 @@ export class OutlineTask implements Task {
+                   : "empty"
+                 : "stopped",
+             );
++      if (this.agent.quotaPaused)
++        this.summary = "达到 AI 请求上限，已暂停；再次点 AI 明确增加额度继续";
+       this.status = complete ? "success" : "paused";
+     } catch (error) {
+-      const detail = error instanceof Error ? error.message : String(error);
++      const detail =
++        error instanceof Error ? error.message : "识别失败，请检查连接或 PDF。";
+       if (this.stopping) {
+         this.summary = t("stopped");
+         this.status = "paused";
+@@ -311,8 +409,29 @@ export class OutlineTask implements Task {
+       )
+     )
+       throw new Error(t("changed"));
+-    await writePDFOutline(this.item, nodes);
+-    await saveOutlineToJSON(this.item, nodes);
++    try {
++      this.fileBaseline = await safeSaveOutline(
++        this.item,
++        nodes,
++        this.fileBaseline!,
++      );
++    } catch (error) {
++      const restored = await fileIdentity(
++        (await this.item.getFilePathAsync()) || "",
++      );
++      if (
++        restored.digest === this.fileBaseline!.digest &&
++        restored.size === this.fileBaseline!.size
++      ) {
++        this.fileBaseline = restored;
++        await this.agent?.checkpoint?.();
++      } else {
++        this.agent = undefined;
++        this.fileBaseline = undefined;
++        this.status = "fail";
++      }
++      throw error;
++    }
+     this.diskBaseline = outlineSnapshot(nodes);
+     for (const doc of documents) {
+       const list = doc.getElementById("root-list")!;
+@@ -339,6 +458,17 @@ export class OutlineTask implements Task {
+         this.baseline,
+       );
+       this.applied = true;
++      try {
++        await IOUtils.writeJSON(
++          statePath(this.item).replace("cache", "usage"),
++          this.usage,
++        );
++        await IOUtils.remove(statePath(this.item), { ignoreAbsent: true });
++      } catch {
++        this.addMsg(
++          "大纲已保存；用量记录或缓存清理失败，可从界面查看本次用量。",
++        );
++      }
+       this.summary = t("saved");
+     } finally {
+       this.saving = false;
+diff --git a/src/modules/outline/taskView.ts b/src/modules/outline/taskView.ts
+index ce3f583..9043307 100644
+--- a/src/modules/outline/taskView.ts
++++ b/src/modules/outline/taskView.ts
+@@ -9,15 +9,52 @@ export function stopOutlineTasks() {
+   for (const task of addon.taskRunner.tasks)
+     if (task instanceof OutlineTask) task.stop();
+ }
+-export async function openOutlineTask(item: Zotero.Item) {
+-  await addon.data.progress.openProgressWindow();
+-  const doc = addon.data.progress.progressWindow?.document;
+-  if (!doc) return;
+-  const focusTask = (id: number) => {
+-    const node = doc.getElementById(`task-header-outline-${id}`);
+-    node?.scrollIntoView({ block: "nearest" });
+-    return !!node;
+-  };
++export async function pauseOutlineTask(item: Zotero.Item): Promise<boolean> {
++  const attachment = item.isPDFAttachment()
++    ? item
++    : item.isRegularItem()
++      ? (await item.getBestAttachments()).find(
++          (a) => a.isPDFAttachment() && !a.deleted,
++        )
++      : undefined;
++  const task = addon.taskRunner.getTaskById(
++    `outline-${(attachment ?? item).id}`,
++  );
++  if (
++    !(task instanceof OutlineTask) ||
++    task.saving ||
++    !["waiting", "processing"].includes(task.status)
++  )
++    return false;
++  task.stop();
++  return true;
++}
++
++export type OutlineAIProgress = {
++  phase:
++    | "preparing"
++    | "local"
++    | "contents"
++    | "calibrating"
++    | "verifying"
++    | "full"
++    | "saving";
++  requests?: number;
++  imagePages?: number;
++  uniquePages?: number;
++  localPages?: number;
++  pdfTotal?: number;
++  tokens?: { total_tokens?: number };
++  completed: number;
++  total: number;
++};
++
++export async function openOutlineTask(
++  item: Zotero.Item,
++  onProgress?: (progress: OutlineAIProgress) => void,
++) {
++  // 保留静默识别 + 自动保存，仅增加进度订阅，不创建进度/校对窗口。
++  onProgress?.({ phase: "preparing", completed: 0, total: 0 });
+   const attachment = item.isPDFAttachment()
+     ? item
+     : item.isRegularItem()
+@@ -27,15 +64,94 @@ export async function openOutlineTask(item: Zotero.Item) {
+       : undefined;
+   const target = attachment ?? item;
+   const existing = addon.taskRunner.getTaskById(`outline-${target.id}`);
+-  if (existing) {
+-    focusTask(target.id);
+-    if (existing instanceof OutlineTask && existing.canResume)
+-      await addon.taskRunner.retryOutlineTask(existing);
+-    return;
++  if (
++    existing instanceof OutlineTask &&
++    (["waiting", "processing"].includes(existing.status) || existing.saving)
++  )
++    return "busy" as const;
++
++  const removeTask = (task: OutlineTask) => {
++    const index = addon.taskRunner.tasks.indexOf(task);
++    if (index >= 0) addon.taskRunner.tasks.splice(index, 1);
++  };
++
++  let unsubscribe: (() => void) | undefined;
++  const watchProgress = (task: OutlineTask) => {
++    unsubscribe?.();
++    const update = () => {
++      onProgress?.({
++        phase: task.saving
++          ? "saving"
++          : task.status === "waiting"
++            ? "preparing"
++            : task.recognitionStage,
++        ...task.usage,
++        pdfTotal: task.totalPages,
++        completed: task.completedPages,
++        total: task.recognitionProgress.total,
++      });
++    };
++    unsubscribe = task.subscribe(update);
++    update();
++  };
++
++  try {
++    let task: OutlineTask;
++    if (existing instanceof OutlineTask && existing.canApply) {
++      // 保存失败时重试写入，避免再次调用收费接口。
++      task = existing;
++      watchProgress(task);
++    } else if (existing instanceof OutlineTask && existing.canResume) {
++      // 保留先前的页面识别进度。
++      task = existing;
++      watchProgress(task);
++      if (task.quotaPaused) task.continueBudget(); // Explicit user click grants one configured budget.
++      await addon.taskRunner.retryOutlineTask(task);
++    } else {
++      if (existing instanceof OutlineTask) removeTask(existing);
++      task = new OutlineTask(target);
++      watchProgress(task);
++      await addon.taskRunner.addTask(task);
++    }
++
++    if (task.keptExisting) {
++      removeTask(task);
++      return "preserved" as const;
++    }
++
++    if (task.status === "paused") return "paused" as const;
++
++    if (task.canApply) {
++      onProgress?.({
++        phase: "saving",
++        ...task.usage,
++        pdfTotal: task.totalPages,
++        completed: task.completedPages,
++        total: task.recognitionProgress.total,
++      });
++      await task.apply(); // 同时更新 PDF 和茉莉花大纲，并刷新阅读器。
++      if (task.applied) {
++        removeTask(task);
++        return "saved" as const; // 保留静默保存，由工具栏显示简短完成状态。
++      }
++    }
++    throw new Error(
++      [task.summary, task.message].filter(Boolean).join("\n") ||
++        "识别未产生有效大纲",
++    );
++  } catch (error) {
++    const detail = error instanceof Error ? error.message : String(error);
++    // Provider response objects may contain request content: never log them.
++    const reader = Zotero.Reader._readers.find(
++      (entry) => entry._item.id === target.id,
++    );
++    (reader?._iframeWindow ?? Zotero.getMainWindow()).alert(
++      `AI 全文大纲识别失败\n\n${detail}\n\n请检查错误原因，然后再次点击工具栏按钮重试。`,
++    );
++    return "failed" as const;
++  } finally {
++    unsubscribe?.();
+   }
+-  await addon.taskRunner.addTask(
+-    addon.taskRunner.createTask(target, "outline"),
+-  );
+ }
+ 
+ export function addOutlineControls(task: OutlineTask, row: Element) {
+@@ -68,9 +184,10 @@ export function addOutlineControls(task: OutlineTask, row: Element) {
+       event.stopPropagation();
+       try {
+         if (action === "stop") task.stop();
+-        else if (action === "continue")
++        else if (action === "continue") {
++          if (task.quotaPaused) task.continueBudget();
+           await addon.taskRunner.retryOutlineTask(task);
+-        else openOutlineReview(task);
++        } else openOutlineReview(task);
+       } catch (error) {
+         task.reportError(error);
+       }
+@@ -81,13 +198,13 @@ export function addOutlineControls(task: OutlineTask, row: Element) {
+ }
+ export function updateOutlineControls(task: OutlineTask, doc: Document) {
+   const progress = doc.getElementById(`outline-progress-${task.id}`);
+-  if (progress) {
+-    const pages = task.recognitionProgress;
++  if (progress)
+     progress.textContent = getString("task-page-progress", {
+-      args: { current: pages.completed, total: pages.total || "—" },
++      args: {
++        current: task.completedPages,
++        total: task.recognitionProgress.total || "—",
++      },
+     });
+-    progress.title = task.summary;
+-  }
+   const enabled = {
+     stop: ["processing", "waiting"].includes(task.status),
+     continue: task.canResume,
+diff --git a/src/modules/outline/tocAgent.ts b/src/modules/outline/tocAgent.ts
+index 9227f3e..ce3cfc5 100644
+--- a/src/modules/outline/tocAgent.ts
++++ b/src/modules/outline/tocAgent.ts
+@@ -28,6 +28,7 @@ interface PrintedPage {
+   value: number;
+ }
+ export interface ContentsCandidate {
++  startPage?: number;
+   entries: ContentsEntry[];
+   endPage: number;
+ }
+@@ -163,8 +164,8 @@ export class TOCRecognitionAgent {
+   private offsets(
+     candidate: ContentsCandidate,
+   ): Map<PrintedPage["kind"], number> | null {
+-    const labels = candidate.entries.map(
+-      (entry) => parsePrintedPage(entry.pageLabel)!,
++    const labels = candidate.entries.map((entry) =>
++      parsePrintedPage(entry.pageLabel)!,
+     );
+     const offsets = new Map<PrintedPage["kind"], number>();
+     for (const kind of new Set(labels.map((label) => label.kind))) {
+@@ -210,13 +211,22 @@ export class TOCRecognitionAgent {
+       this.check(signal);
+       let offsets = this.offsets(candidate);
+       if (!offsets) {
+-        const afterContents = Array.from(
+-          { length: Math.min(5, this.pdf.numPages - candidate.endPage) },
+-          (_, i) => candidate.endPage + 1 + i,
+-        );
+-        await this.inspect(afterContents);
+-        this.check(signal);
+-        offsets = this.offsets(candidate);
++        // Front matter can separate the TOC from body page 1 by many leaves.
++        // Bound calibration to 30 local physical pages; reuse already scanned pages.
++        for (
++          let first = candidate.endPage + 1;
++          first <= Math.min(candidate.endPage + 30, this.pdf.numPages);
++          first += 5
++        ) {
++          const afterContents = Array.from(
++            { length: Math.min(5, this.pdf.numPages - first + 1) },
++            (_, i) => first + i,
++          );
++          await this.inspect(afterContents);
++          this.check(signal);
++          offsets = this.offsets(candidate);
++          if (offsets) break;
++        }
+       }
+       if (!offsets) return null;
+       const mapped = candidate.entries.map((entry) => {
+@@ -257,10 +267,11 @@ export class TOCRecognitionAgent {
+         const scan = this.scans.get(row.page);
+         if (scan?.contents) return false;
+         const label = scan?.pageLabel ? parsePrintedPage(scan.pageLabel) : null;
+-        if (label)
+-          return (
+-            label.kind === row.printed.kind && label.value === row.printed.value
+-          );
++        if (
++          label &&
++          (label.kind !== row.printed.kind || label.value !== row.printed.value)
++        )
++          return false;
+         const unique =
+           candidate.entries.filter(
+             (entry) => compact(entry.title) === compact(row.entry.title),
+diff --git a/src/modules/workers/index.ts b/src/modules/workers/index.ts
+index 979d162..66d9fa2 100644
+--- a/src/modules/workers/index.ts
++++ b/src/modules/workers/index.ts
+@@ -7,7 +7,6 @@ import {
+ } from "./outline";
+ 
+ self.onmessage = async (e) => {
+-  console.log("Minimal Worker收到:", e.data);
+   const data = e.data;
+   if (data?.action === "nativeOutline" || data?.action === "textPDF") {
+     try {
+@@ -53,7 +52,7 @@ self.onmessage = async (e) => {
+   } else if (data && data.action === "addOutline") {
+     const { filePath, outlineNodes } = data;
+     try {
+-      await addOutlineToPDF(filePath, outlineNodes);
++      await addOutlineToPDF(filePath, outlineNodes, data.expectedFile);
+       self.postMessage({
+         action: "addOutlineReturn",
+         jobID: data.jobID,
+diff --git a/src/modules/workers/outline.ts b/src/modules/workers/outline.ts
+index a87d7b0..37ac2e6 100644
+--- a/src/modules/workers/outline.ts
++++ b/src/modules/workers/outline.ts
+@@ -112,7 +112,18 @@ function createOutlineDict(
+ export async function addOutlineToPDF(
+   pdfPath: string,
+   outlineNodes: OutlineNode[],
++  expectedFile?: { size: number; modified: number },
+ ) {
++  const guard = async () => {
++    if (!expectedFile) return;
++    const stat = await IOUtils.stat(pdfPath);
++    if (
++      stat.size !== expectedFile.size ||
++      stat.lastModified !== expectedFile.modified
++    )
++      throw new Error("PDF changed before write");
++  };
++  await guard();
+   const pdfBytes = await IOUtils.read(pdfPath);
+   const pdfDoc = await PDFDocument.load(pdfBytes);
+   // PDF Page reference
+@@ -138,7 +149,9 @@ export async function addOutlineToPDF(
+   validate(outlineNodes);
+   if (!outlineNodes.length) {
+     pdfDoc.catalog.delete(PDFName.of("Outlines"));
+-    await IOUtils.write(pdfPath, await pdfDoc.save(), {
++    const empty = await pdfDoc.save();
++    await guard();
++    await IOUtils.write(pdfPath, empty, {
+       tmpPath: `${pdfPath}.jasminum.tmp`,
+     });
+     return;
+@@ -157,7 +170,6 @@ export async function addOutlineToPDF(
+   //First 'Outline' object. Refer to table H.3 in Annex H.6 of PDF Specification doc.
+   pdfDoc.context.assign(rootRef, outlinesDict);
+ 
+-  console.log("Prepared outline nodes: ", preparedOutlineNodes);
+   // Add outline item dict
+   const loop = (nodes: OutlineNode[], parentRef: PDFRef) => {
+     nodes.forEach((node: OutlineNode, idx: number) => {
+@@ -180,6 +192,7 @@ export async function addOutlineToPDF(
+   loop(preparedOutlineNodes, rootRef);
+ 
+   const pdfBytesWithOutline = await pdfDoc.save();
++  await guard();
+   await IOUtils.write(pdfPath, pdfBytesWithOutline, {
+     tmpPath: `${pdfPath}.jasminum.tmp`,
+   });
+@@ -242,7 +255,7 @@ export async function readNativeOutline(
+   const seen = new Set<any>();
+   const walk = (first: any, level: number): OutlineNode[] => {
+     const result: OutlineNode[] = [];
+-    for (let value = first; value; ) {
++    for (let value = first; value;) {
+       const dict = resolve(value);
+       if (!(dict instanceof PDFDict) || seen.has(dict)) break;
+       seen.add(dict);
+diff --git a/src/utils/llm.ts b/src/utils/llm.ts
+index 5530c26..e66c648 100644
+--- a/src/utils/llm.ts
++++ b/src/utils/llm.ts
+@@ -111,6 +111,11 @@ interface StructuredResponseFormat {
+ }
+ 
+ interface JSONCompletionOptions {
++  onUsage?: (usage: {
++    prompt_tokens?: number;
++    completion_tokens?: number;
++    total_tokens?: number;
++  }) => void;
+   signal?: AbortSignal;
+   timeout?: number;
+   systemPrompt: string;
+@@ -186,6 +191,11 @@ interface PDFPageRecognitionResult {
+ }
+ 
+ interface ChatCompletionResponse {
++  usage?: {
++    prompt_tokens?: number;
++    completion_tokens?: number;
++    total_tokens?: number;
++  };
+   choices?: Array<{
+     message?: {
+       content?: string | null;
+@@ -417,6 +427,7 @@ class OpenAIClient {
+             response_format: { type: "json_object" },
+           }),
+           responseType: "text",
++          errorDelayIntervals: [], // Each retry must pass the visible request budget.
+           requestObserver: (request: XMLHttpRequest) => {
+             xhr = request;
+             if (options.signal?.aborted) abort();
+@@ -427,6 +438,19 @@ class OpenAIClient {
+       const responseBody = JSON.parse(
+         response.responseText,
+       ) as ChatCompletionResponse;
++      if (responseBody.usage) {
++        const usage: NonNullable<ChatCompletionResponse["usage"]> = {};
++        for (const key of [
++          "prompt_tokens",
++          "completion_tokens",
++          "total_tokens",
++        ] as const) {
++          const n = responseBody.usage[key];
++          if (typeof n === "number" && Number.isSafeInteger(n) && n >= 0)
++            usage[key] = n;
++        }
++        options.onUsage?.(usage);
++      }
+       const content = responseBody.choices?.[0]?.message?.content;
+       if (!content) {
+         throw new Error("LLM response does not contain message content");
+@@ -434,6 +458,24 @@ class OpenAIClient {
+       const result = parseJSONContent<T>(content);
+       validateJSON(result, options.responseFormat.schema);
+       return result;
++    } catch (error) {
++      // HTTP error objects can embed headers, credentials or the document body.
++      const message = error instanceof Error ? error.message : "";
++      if (
++        /^(Request cancelled|LLM returned invalid JSON|LLM returned invalid JSON field:|LLM JSON is missing field:|LLM JSON contains unexpected field:|LLM response does not contain message content)/.test(
++          message,
++        )
++      )
++        throw new Error(message);
++      const status =
++        typeof (error as { status?: unknown })?.status === "number"
++          ? (error as { status: number }).status
++          : undefined;
++      throw new Error(
++        status
++          ? `AI 请求失败：HTTP ${status}；请检查额度、认证及服务状态。`
++          : "AI 请求失败：网络中断、超时或服务不可用；成功页已保留，可重试。",
++      );
+     } finally {
+       options.signal?.removeEventListener("abort", abort);
+     }
+diff --git a/test/outline_contents_test.cjs b/test/outline_contents_test.cjs
+index ce29599..8d5fb39 100644
+--- a/test/outline_contents_test.cjs
++++ b/test/outline_contents_test.cjs
+@@ -63,6 +63,7 @@ function harness(options = {}) {
+     stages = [];
+   let agent, failPage, cancelPage;
+   const mocks = {
++    "../../utils/prefs": {getPref:k=>k==="outlineRecognitionMode"?"smart":100},
+     "../../utils/llm": {
+       getConfiguredLLMClient: () => ({
+         createJSONCompletion: async (request) => {
+@@ -183,7 +184,7 @@ async function main() {
+   assert.equal(normal.agent.usedContents, true);
+   assert.equal(
+     normal.rendered.length,
+-    15,
++    5,
+     "text-layer target verification should not send body images",
+   );
+   assert.deepEqual(
+@@ -192,13 +193,13 @@ async function main() {
+   );
+   assert(normal.agent.headings.every((h) => h.exact && h.y === 700));
+   assert.deepEqual(plain(normal.agent.pageProgress), {
+-    completed: 15,
+-    total: 15,
++    completed: 5,
++    total: 5,
+   });
+   await run(normal);
+   assert.equal(
+     normal.rendered.length,
+-    15,
++    5,
+     "completed agents must not resume full scanning",
+   );
+   const scanned = harness({
+@@ -216,10 +217,10 @@ async function main() {
+   assert.equal(scanned.agent.usedContents, true);
+   assert.equal(
+     scanned.rendered.length,
+-    17,
++    11,
+     "scans need only a few target-page checks after the initial 15",
+   );
+-  assert(scanned.stages.includes("calibrating"));
++  assert(scanned.stages.includes("verifying"));
+   const pageOnly = scanned.agent.headings[1];
+   assert.equal(pageOnly.pageOnly, true);
+   assert.equal(pageOnly.exact, false);
+@@ -231,8 +232,8 @@ async function main() {
+   assert.equal(scanned.agent.headings[2].pageOnly, undefined);
+   assert.equal(scanned.agent.headings[2].exact, false);
+   assert.deepEqual(plain(scanned.agent.pageProgress), {
+-    completed: 17,
+-    total: 17,
++    completed: 11,
++    total: 11,
+   });
+   const extended = harness({
+     contents: contentsPages(chapters, 14, 16),
+@@ -350,19 +351,19 @@ async function main() {
+     failed.agent.run(() => {}),
+     /calibration request failed/,
+   );
+-  assert.equal(failed.agent.nextPage, 16);
++  assert.equal(failed.agent.nextPage, 6);
+   failed.setFailure(undefined);
+   await run(failed);
+   assert.equal(failed.agent.usedContents, true);
+   assert.equal(
+-    failed.rendered.filter((page) => page <= 15).length,
+-    15,
++    failed.rendered.filter((page) => page <= 5).length,
++    5,
+     "resume must not resend a completed initial probe",
+   );
+   const stopped = harness({ scanned: true });
+   stopped.setCancel(96);
+   assert.equal(await stopped.agent.run(() => {}), false);
+-  assert.equal(stopped.agent.nextPage, 16);
++  assert.equal(stopped.agent.nextPage, 6);
+   assert.equal(stopped.agent.usedContents, false);
+   stopped.setCancel(undefined);
+   await run(stopped);
+@@ -371,7 +372,8 @@ async function main() {
+   const edited = harness({ scanned: true });
+   edited.setCancel(96);
+   assert.equal(await edited.agent.run(() => {}), false);
+-  edited.agent.headings[0].title = "My manually edited heading";
++  // The early TOC probe may not yet include any body headings. Simulate a manual insertion.
++  edited.agent.headings.push({title:"My manually edited heading",level:1,page:1,left:0,top:0,x:0,y:700,exact:false});
+   edited.agent.keepPartialOutline();
+   edited.setCancel(undefined);
+   await run(edited);
+diff --git a/test/outline_recognition_test.cjs b/test/outline_recognition_test.cjs
+index dbc86a8..1dd4569 100644
+--- a/test/outline_recognition_test.cjs
++++ b/test/outline_recognition_test.cjs
+@@ -31,6 +31,7 @@ async function main() {
+     cancelOnResponse = false,
+     agent;
+   const api = load({
++    "../../utils/prefs": {getPref:k=>k==="outlineRecognitionMode"?"full":100},
+     "../../utils/llm": {
+       getConfiguredLLMClient: () => ({
+         createJSONCompletion: async (options) => {
+diff --git a/test/outline_task_test.cjs b/test/outline_task_test.cjs
+index c273c3b..93bbf13 100644
+--- a/test/outline_task_test.cjs
++++ b/test/outline_task_test.cjs
+@@ -31,8 +31,10 @@ async function main() {
+       this.pdf = pdf;
+       this.nextPage = 1;
+       this.headings = [];
++      this.sentPages = new Set();
+       this.id = id;
+     }
++    exportCache(){return {};}
+     stop() {
+       this.stopped = true;
+     }
+@@ -102,6 +104,7 @@ async function main() {
+     version: "10",
+   };
+   const globals = {
++    IOUtils: {readJSON:async()=>{throw Error("missing");}, writeJSON:async()=>{},remove:async()=>{}},
+     addon,
+     Zotero,
+     ztoolkit: { log() {}, getGlobal: () => Zotero },
+@@ -111,6 +114,8 @@ async function main() {
+     "src/modules/outline/task.ts",
+     {
+       "../../utils/locale": locale,
++      "./background": {outlineJob:async()=>[]},
++      "./safeState": {fileIdentity:async()=>({size:1,modified:1,digest:"fixed"}),sameFile:()=>true,statePath:()=>"/cache",safeSaveOutline:async(_item,nodes)=>{if(failPDF)throw Error("PDF write failed");pdfWrites++;storedOutline=nodes;return {size:1,modified:1,digest:"fixed"};}},
+       "./index": { addOutlineToReader: async () => {} },
+       "./pdfAdapter": { adaptOutlinePDFDocument: async () => pdf },
+       "./savePDF": {
+@@ -445,49 +450,7 @@ async function main() {
+     rendered,
+     Array.from(runner.tasks, (task) => task.id),
+   );
+-  // Menu/sidebar entry starts a task immediately and resolves the preferred PDF.
+-  const enqueued = [];
+-  const resumed = [];
+-  const preferred = { id: 91, isPDFAttachment: () => true };
+-  const viewRunner = {
+-    getTaskById: () => undefined,
+-    createTask: (item) => item,
+-    addTask: async (item) => enqueued.push(item.id),
+-    retryOutlineTask: async (task) => resumed.push(task.id),
+-  };
+-  const { openOutlineTask } = load(
+-    "src/modules/outline/taskView.ts",
+-    {
+-      "../../utils/locale": locale,
+-      "./task": { OutlineTask },
+-    },
+-    {
+-      addon: {
+-        taskRunner: viewRunner,
+-        data: {
+-          progress: {
+-            openProgressWindow: async () => {},
+-            progressWindow: { document: { getElementById: () => null } },
+-          },
+-        },
+-      },
+-    },
+-  );
+-  await openOutlineTask(preferred);
+-  await openOutlineTask({
+-    isPDFAttachment: () => false,
+-    isRegularItem: () => true,
+-    getBestAttachments: async () => [
+-      { isPDFAttachment: () => false },
+-      preferred,
+-    ],
+-  });
+-  assert.deepEqual(enqueued, [91, 91]);
+-  viewRunner.getTaskById = () => task;
+-  task.status = "paused";
+-  await openOutlineTask(preferred);
+-  assert.deepEqual(resumed, [task.id]);
+-  assert.equal(enqueued.length, 2);
++  // Silent sidebar/save behavior is covered by smart/state.test.cjs and native UI tests.
+   console.log(
+     "OutlineTask queue, deduplication, cancellation, retry and result retention passed",
+   );
+diff --git a/test/outline_test.cjs b/test/outline_test.cjs
+index 30c0177..a8d4a51 100644
+--- a/test/outline_test.cjs
++++ b/test/outline_test.cjs
+@@ -14,6 +14,7 @@ function load(file, mocks = {}, globals = {}) {
+   }).outputText;
+   vm.runInNewContext(code, {
+     exports,
++    setTimeout,clearTimeout,
+     Error,
+     require: (n) => mocks[n] ?? require(n),
+     console: { log() {} },
+diff --git a/test/smart/helpers.cjs b/test/smart/helpers.cjs
+new file mode 100644
+index 0000000..5be8fe2
+--- /dev/null
++++ b/test/smart/helpers.cjs
+@@ -0,0 +1,44 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const path = require("node:path");
++const vm = require("node:vm");
++const ts = require("typescript");
++function load(file, mocks = {}, globals = {}, cache = new Map()) {
++  file = path.resolve(file);
++  if (cache.has(file)) return cache.get(file);
++  const exports = {};
++  cache.set(file, exports);
++  vm.runInNewContext(
++    ts.transpileModule(fs.readFileSync(file, "utf8"), {
++      compilerOptions: {
++        module: ts.ModuleKind.CommonJS,
++        target: ts.ScriptTarget.ES2022,
++      },
++    }).outputText,
++    {
++      exports,
++      require: (n) =>
++        mocks[n] ??
++        (n.endsWith(".json")
++          ? require(path.resolve(path.dirname(file), n))
++          : load(
++              path.resolve(path.dirname(file), n + ".ts"),
++              mocks,
++              globals,
++              cache,
++            )),
++      Error,
++      console,
++      AbortController,
++      Uint8Array,
++      setTimeout,
++      clearTimeout,
++      Zotero: { getMainWindow: () => ({ AbortController }) },
++      ...globals,
++    },
++  );
++  return exports;
++}
++
++module.exports = { load };
+diff --git a/test/smart/outline.test.cjs b/test/smart/outline.test.cjs
+new file mode 100644
+index 0000000..902e663
+--- /dev/null
++++ b/test/smart/outline.test.cjs
+@@ -0,0 +1,340 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const path = require("node:path");
++const vm = require("node:vm");
++const ts = require("typescript");
++function load(file, mocks = {}, globals = {}, cache = new Map()) {
++  file = path.resolve(file);
++  if (cache.has(file)) return cache.get(file);
++  const exports = {};
++  cache.set(file, exports);
++  vm.runInNewContext(
++    ts.transpileModule(fs.readFileSync(file, "utf8"), {
++      compilerOptions: {
++        module: ts.ModuleKind.CommonJS,
++        target: ts.ScriptTarget.ES2022,
++      },
++    }).outputText,
++    {
++      exports,
++      require: (n) =>
++        mocks[n] ??
++        (n.endsWith(".json")
++          ? require(path.resolve(path.dirname(file), n))
++          : load(
++              path.resolve(path.dirname(file), n + ".ts"),
++              mocks,
++              globals,
++              cache,
++            )),
++      Error,
++      console,
++      AbortController,
++      Uint8Array,
++      setTimeout,
++      clearTimeout,
++      Zotero: { getMainWindow: () => ({ AbortController }) },
++      ...globals,
++    },
++  );
++  return exports;
++}
++const entries = [
++  { title: "第一章 理论基础", level: 1, pageLabel: "1", page: 15 },
++  { title: "第一节 研究方法", level: 2, pageLabel: "2", page: 16 },
++  { title: "一、核心概念", level: 3, pageLabel: "3", page: 17 },
++  { title: "第二章 历史分析", level: 1, pageLabel: "130", page: 144 },
++  { title: "第一节 材料分析", level: 2, pageLabel: "131", page: 145 },
++  { title: "一、史料说明", level: 3, pageLabel: "132", page: 146 },
++  { title: "第三章 结论", level: 1, pageLabel: "280", page: 294 },
++];
++const viewport = {
++  width: 600,
++  height: 800,
++  convertToPdfPoint: (x, y) => [x, 800 - y],
++};
++const item = (str, x = 40, y = 700) => ({ str, transform: [1, 0, 0, 0, x, y] });
++function harness({
++  mode = "smart",
++  limit = 100,
++  local = false,
++  noTOC = false,
++  entries: rows = entries,
++  failAt = 0,
++  corruptSample = false,
++  numPages = 297,
++} = {}) {
++  const calls = [];
++  let fail = failAt,
++    agent,
++    cache;
++  const pdf = {
++    numPages,
++    getPage: async (p) => ({
++      getViewport: () => viewport,
++      getTextContent: async () => ({
++        items: !local
++          ? []
++          : p === 3 && !noTOC
++            ? [
++                item("目录", 40, 760),
++                ...rows.map((e, i) =>
++                  item(
++                    e.title + " …… " + e.pageLabel,
++                    40 + (e.level - 1) * 20,
++                    730 - i * 24,
++                  ),
++                ),
++              ]
++            : rows.filter((e) => e.page === p).map((e) => item(e.title)),
++      }),
++    }),
++  };
++  const mocks = {
++    "../../utils/prefs": {
++      getPref: (k) => (k === "outlineRecognitionMode" ? mode : limit),
++    },
++    "../../utils/llm": {
++      getConfiguredLLMClient: () => ({
++        createJSONCompletion: async (options) => {
++          const pages = Array.from(
++            options.responseFormat.schema.properties.pages.items.properties.page
++              .enum,
++          );
++          assert(pages.length <= 5);
++          calls.push(pages);
++          if (calls.length === fail) {
++            fail = 0;
++            throw Error("network interruption");
++          }
++          options.onUsage?.({
++            prompt_tokens: 10,
++            completion_tokens: 2,
++            total_tokens: 12,
++          });
++          return {
++            pages: pages.map((p) => ({
++              page: p,
++              headings:
++                p === 3 && !noTOC
++                  ? []
++                  : rows
++                      .filter((e) => e.page === p)
++                      .map((e) => ({
++                        title: e.title,
++                        level: e.level,
++                        left: 0.1,
++                        top: 0.1,
++                      })),
++              ...(options.responseFormat.name === "contents_outline"
++                ? {
++                    pageLabel:
++                      corruptSample && p === 294
++                        ? "279"
++                        : p >= 15
++                          ? String(p - 14)
++                          : null,
++                    contents:
++                      p === 3 && !noTOC
++                        ? {
++                            starts: true,
++                            continues: false,
++                            entries: rows.map(({ page, ...e }) => e),
++                          }
++                        : null,
++                  }
++                : {}),
++            })),
++          };
++        },
++      }),
++    },
++    "../../utils/pdfImage": {
++      renderPDFPagesAsPNG: async (id, pages) =>
++        pages.map((pageIndex) => ({
++          pageIndex,
++          data: new Uint8Array([1]),
++          mimeType: "image/png",
++        })),
++    },
++  };
++  const api = load("src/modules/outline/recognitionAgent.ts", mocks);
++  agent = new api.OutlineRecognitionAgent(7, pdf);
++  agent.checkpoint = async () => {
++    cache = JSON.parse(JSON.stringify(agent.exportCache()));
++  };
++  return {
++    agent,
++    calls,
++    pdf,
++    api,
++    get cache() {
++      return cache;
++    },
++    run: () => agent.run(() => {}),
++    mocks,
++  };
++}
++test("297页：完整本地多级目录零AI，所有目的地精确且保留章节目", async () => {
++  const h = harness({ local: true });
++  assert.equal(await h.run(), true);
++  assert.equal(h.calls.length, 0);
++  assert(h.agent.usedContents);
++  assert.equal(h.agent.headings.length, 7);
++  assert.deepEqual(
++    Array.from(h.agent.headings, (h) => h.page),
++    entries.map((e) => e.page),
++  );
++  assert.equal(h.agent.headings[2].level, 3);
++  assert(h.agent.headings.every((h) => h.exact));
++});
++test("297页扫描版：目录+校准+抽样提前结束，重复运行无调用", async () => {
++  const h = harness();
++  assert.equal(await h.run(), true);
++  assert(h.agent.usedContents);
++  assert(h.calls.length <= 6);
++  assert(h.agent.imagePages < 25);
++  const before = h.calls.length;
++  await h.run();
++  assert.equal(h.calls.length, before);
++  assert.deepEqual(
++    Array.from(h.agent.headings, (h) => h.page),
++    entries.map((e) => e.page),
++  );
++});
++test("无目录：缓存的前30页复用于全文，总计60请求297图片", async () => {
++  const h = harness({ noTOC: true });
++  assert.equal(await h.run(), true);
++  assert(!h.agent.usedContents);
++  assert.equal(h.calls.length, 60);
++  assert.equal(h.agent.imagePages, 297);
++  assert.equal(new Set(h.calls.flat()).size, 297);
++  assert.equal(h.agent.tokens.total_tokens, 720);
++});
++test("完整模式忽略目录捷径并识别全部297页", async () => {
++  const h = harness({ mode: "full" });
++  assert.equal(await h.run(), true);
++  assert.equal(h.calls.length, 60);
++  assert.equal(h.agent.stage, "full");
++  assert(!h.agent.usedContents);
++});
++test("上限暂停后显式增加额度；成功页不重发", async () => {
++  const h = harness({ mode: "full", limit: 2 });
++  assert.equal(await h.run(), false);
++  assert(h.agent.quotaPaused);
++  assert.equal(h.calls.length, 2);
++  assert.equal(await h.run(), false);
++  assert.equal(h.calls.length, 2);
++  h.agent.continueBudget();
++  await h.run();
++  assert.equal(h.calls.length, 4);
++  assert.equal(new Set(h.calls.flat()).size, 20);
++});
++test("网络中断恢复不重复成功页；失败请求和图片也计入统计", async () => {
++  const h = harness({ mode: "full", failAt: 2, numPages: 17 });
++  await assert.rejects(h.run(), /network/);
++  assert.equal(h.agent.requests, 2);
++  await h.run();
++  assert.equal(h.calls.length, 5);
++  assert.equal(h.agent.imagePages, 22);
++  assert.equal(h.calls.filter((p) => p.includes(1)).length, 1);
++});
++test("重启恢复缓存及累计额度，不存图片正文和认证信息", async () => {
++  const h = harness({ mode: "full", limit: 2 });
++  await h.run();
++  const saved = h.cache;
++  const fresh = harness({ mode: "full", limit: 2 });
++  fresh.agent.restoreCache(saved);
++  await fresh.run();
++  assert.equal(fresh.calls.length, 0);
++  fresh.agent.continueBudget();
++  await fresh.run();
++  assert.equal(fresh.calls[0][0], 11);
++  const text = JSON.stringify(saved);
++  assert(!/apiKey|baseURL|image\/png|data:|bodyText|password/.test(text));
++});
++test("复杂页码：罗马前言、阿拉伯正文和附录重置通过逐标题定位", async () => {
++  const rows = [
++    { title: "序言", level: 1, pageLabel: "iv", page: 8 },
++    { title: "第一章 论证", level: 1, pageLabel: "1", page: 15 },
++    { title: "第一节 分析", level: 2, pageLabel: "2", page: 16 },
++    { title: "附录 资料", level: 1, pageLabel: "1", page: 290 },
++  ];
++  const h = harness({ local: true, entries: rows });
++  await h.run();
++  assert.equal(h.calls.length, 0);
++  assert.deepEqual(
++    Array.from(h.agent.headings, (h) => h.page),
++    [8, 15, 16, 290],
++  );
++});
++test("目录缺失续页或双栏拼接不会被本地误判为完整", async () => {
++  const { LocalOutlineReader } = load("src/modules/outline/localTOC.ts");
++  const pdf = {
++    numPages: 30,
++    getPage: async () => ({
++      getTextContent: async () => ({
++        items: [item("目录"), item("第一章 A …… 1  第二章 B …… 10", 40, 600)],
++      }),
++    }),
++  };
++  assert.equal(await new LocalOutlineReader(pdf, () => {}).contents(30), null);
++});
++test("抽样页码不一致时拒绝目录偏移，回退全文且复用扫描缓存", async () => {
++  const h = harness({ corruptSample: true });
++  await h.run();
++  assert.equal(h.agent.usedContents, false);
++  assert.equal(new Set(h.calls.flat()).size, 297);
++  assert.equal(h.agent.imagePages, 297);
++});
++test("取消时完整有效响应仍缓存；重启不重复成功批次", async () => {
++  const h = harness({ mode: "full", numPages: 10 });
++  const orig = h.mocks["../../utils/llm"].getConfiguredLLMClient;
++  h.mocks["../../utils/llm"].getConfiguredLLMClient = () => ({
++    createJSONCompletion: async (o) => {
++      const result = await orig().createJSONCompletion(o);
++      h.agent.stop();
++      return result;
++    },
++  });
++  assert.equal(await h.run(), false);
++  assert.equal(h.cache.scans.length, 5);
++  const fresh = harness({ mode: "full", numPages: 10 });
++  fresh.agent.restoreCache(h.cache);
++  await fresh.run();
++  assert.equal(fresh.calls.length, 1);
++  assert.equal(fresh.calls[0][0], 6);
++});
++module.exports = { load, harness };
++
++test("本地目录紧邻正文章标题时仍走零调用路径", async () => {
++  const rows = [
++    { title: "第一章 正文", level: 1, pageLabel: "1", page: 4 },
++    { title: "第一节 方法", level: 2, pageLabel: "2", page: 5 },
++    { title: "一、证据", level: 3, pageLabel: "3", page: 6 },
++  ];
++  const h = harness({ local: true, entries: rows });
++  await h.run();
++  assert.equal(h.calls.length, 0);
++  assert.equal(h.agent.headings.length, 3);
++});
++test("无usage时不捏造token统计", async () => {
++  const h = harness({ mode: "full", numPages: 5 });
++  const original = h.mocks["../../utils/llm"].getConfiguredLLMClient;
++  h.mocks["../../utils/llm"].getConfiguredLLMClient = () => ({
++    createJSONCompletion: (o) =>
++      original().createJSONCompletion({ ...o, onUsage: undefined }),
++  });
++  await h.run();
++  assert.equal(h.agent.tokens.total_tokens, undefined);
++  assert.equal(h.agent.localPages, 5);
++});
++test("缓存不能跨识别模式恢复", async () => {
++  const h = harness({ mode: "full", numPages: 5 });
++  await h.run();
++  const fresh = harness({ mode: "smart", numPages: 5 });
++  fresh.agent.restoreCache(h.cache);
++  assert.equal(fresh.agent.requests, 0);
++  assert.equal(fresh.agent.inspectedPages, 0);
++});
+diff --git a/test/smart/state.test.cjs b/test/smart/state.test.cjs
+new file mode 100644
+index 0000000..008ed62
+--- /dev/null
++++ b/test/smart/state.test.cjs
+@@ -0,0 +1,177 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const { load } = require("./helpers.cjs");
++const id = { size: 10, modified: 1, digest: "old" };
++function state({ failJSON = false, changed = false } = {}) {
++  const files = new Map([
++    ["/doc.pdf", new Uint8Array([1])],
++    ["/data/storage/K/jasminum-outline.json", new Uint8Array([2])],
++  ]);
++  let current = { ...id },
++    writes = 0,
++    statCalls = 0;
++  const io = {
++    stat: async () => {
++      statCalls++;
++      return { size: current.size, lastModified: current.modified };
++    },
++    exists: async (p) => files.has(p),
++    makeDirectory: async () => {},
++    copy: async (a, b) => {
++      assert(!files.has(b));
++      files.set(b, files.get(a));
++    },
++    read: async (p) => files.get(p),
++    write: async (p, bytes) => {
++      files.set(p, bytes);
++      current = { ...id, modified: 3 };
++    },
++    remove: async (p) => files.delete(p),
++  };
++  const api = load(
++    "src/modules/outline/safeState.ts",
++    {
++      "./savePDF": {
++        writePDFOutline: async (item, nodes, expected) => {
++          assert.equal(expected.modified, 1);
++          writes++;
++          current = { size: 12, modified: 2, digest: "new" };
++          files.set("/doc.pdf", new Uint8Array([3]));
++        },
++      },
++      "./outline": {
++        saveOutlineToJSON: async () => {
++          if (failJSON) throw Error("disk full");
++        },
++      },
++    },
++    {
++      IOUtils: io,
++      PathUtils: {
++        join: (...s) => s.join("/").replace(/\/+/g, "/"),
++        parent: (p) => p.slice(0, p.lastIndexOf("/")),
++      },
++      Zotero: {
++        DataDirectory: { dir: "/data" },
++        Utilities: {
++          randomString: () => String(statCalls),
++          Internal: { md5Async: async () => current.digest },
++        },
++      },
++    },
++  );
++  return {
++    api,
++    files,
++    get writes() {
++      return writes;
++    },
++    item: { key: "K", getFilePathAsync: async () => "/doc.pdf" },
++    change: () => (current = { ...id, digest: "external" }),
++  };
++}
++test("保存前PDF内容改变，即使大小与mtime相同也拒绝且不写入", async () => {
++  const s = state();
++  s.change();
++  await assert.rejects(s.api.safeSaveOutline(s.item, [], id), /已改变/);
++  assert.equal(s.writes, 0);
++});
++test("保存成功备份PDF及旧sidecar，保留多代备份", async () => {
++  const s = state();
++  await s.api.safeSaveOutline(s.item, [], id);
++  assert.equal(s.writes, 1);
++  assert(
++    [...s.files.keys()].some(
++      (k) => k.includes("jasminum-ai-backups") && k.endsWith(".pdf"),
++    ),
++  );
++  assert(
++    [...s.files.keys()].some(
++      (k) => k.includes("jasminum-ai-backups") && k.endsWith(".json"),
++    ),
++  );
++});
++test("sidecar写入失败恢复本次PDF及旧JSON，保留备份可恢复", async () => {
++  const s = state({ failJSON: true });
++  await assert.rejects(s.api.safeSaveOutline(s.item, [], id), /保存失败/);
++  assert.deepEqual(Array.from(s.files.get("/doc.pdf")), [1]);
++  assert.deepEqual(
++    Array.from(s.files.get("/data/storage/K/jasminum-outline.json")),
++    [2],
++  );
++});
++function taskHarness(nodes, invalid = false) {
++  let runs = 0;
++  const pdf = { numPages: 297 };
++  class Agent {
++    constructor() {
++      this.pdf = pdf;
++      this.headings = [];
++      this.sentPages = new Set();
++    }
++    async run() {
++      runs++;
++      return true;
++    }
++  }
++  const api = load(
++    "src/modules/outline/task.ts",
++    {
++      "./safeState": {
++        fileIdentity: async () => id,
++        sameFile: () => true,
++        statePath: () => "/cache",
++      },
++      "./background": { outlineJob: async () => nodes },
++      "./pdfAdapter": { adaptOutlinePDFDocument: async () => pdf },
++      "../../utils/locale": { getString: (s) => s },
++      "./outline": {
++        getOutlineFromPDF: async () => nodes,
++        getOutlineFromPage: () => [],
++        saveOutlineToJSON: async () => {},
++      },
++      "./recognitionAgent": {
++        OutlineRecognitionAgent: Agent,
++        headingTree: () => [],
++      },
++    },
++    {
++      IOUtils: {},
++      addon: { data: { progress: { updateTaskStatus() {} } } },
++      Zotero: { Reader: { _readers: [] } },
++    },
++  );
++  const task = new api.OutlineTask({
++    id: 5,
++    deleted: false,
++    isPDFAttachment: () => true,
++    isEditable: () => true,
++    getFilePathAsync: async () => "/book.pdf",
++  });
++  return {
++    task,
++    get runs() {
++      return runs;
++    },
++  };
++}
++test("重复运行已有有效大纲：保留全部数据且不创建AI请求", async () => {
++  const h = taskHarness([
++    { title: "Existing", page: 15, level: 1, x: 0, y: 700, children: [] },
++  ]);
++  await h.task.run();
++  assert(h.task.keptExisting);
++  assert(h.task.applied);
++  assert.equal(h.runs, 0);
++});
++test("已有无效大纲：失败重试也不得覆盖或调用AI", async () => {
++  const h = taskHarness([
++    { title: "Broken", page: 999, level: 1, x: 0, y: 0, children: [] },
++  ]);
++  await h.task.run();
++  assert.equal(h.task.status, "fail");
++  h.task.prepareRetry();
++  await h.task.run();
++  assert.equal(h.runs, 0);
++  assert.equal(h.task.status, "fail");
++});
+diff --git a/typings/prefs.d.ts b/typings/prefs.d.ts
+index 920d9c6..024dc00 100644
+--- a/typings/prefs.d.ts
++++ b/typings/prefs.d.ts
+@@ -31,9 +31,12 @@ declare namespace _ZoteroTypes {
+       "translatorUpdateTime": string;
+       "translatorSource": string;
+       "enableBookmark": boolean;
++      "autoRecognizeOutline": boolean;
+       "showSelectionPopupActions": boolean;
+       "newNodeAsChild": boolean;
+       "disableZoteroOutline": boolean;
++      "outlineRecognitionMode": string;
++      "outlineRequestLimit": number;
+     };
+   }
+ }

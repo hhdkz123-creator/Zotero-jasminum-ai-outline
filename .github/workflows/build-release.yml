@@ -1,118 +1,61 @@
 name: Build Zotero-jasminum-ai-outline
-
 on:
   push:
     branches: [main]
-    paths:
-      - ".github/workflows/build-release.yml"
-      - "patches/**"
-      - "README.md"
+    paths: ['.github/workflows/build-release.yml', 'patches/**', 'tests/**', 'build-support/**', 'README.md', 'updates-manual.json']
   workflow_dispatch:
-
 permissions:
   contents: write
-
 env:
-  UPSTREAM_REF: 9af49f7175d2257a15d1ee1598da893569510e29
-  TAG: v1.1.44-ai.2
-  RELEASE_FILE: Zotero-jasminum-ai-outline_v1.1.44-ai.2.xpi
-
+  UPSTREAM_REF: d3b1b3227b0e46aaf56585c5c09ff9e343152ce4
+  TAG: v1.1.45-ai.1
+  RELEASE_FILE: Zotero-jasminum-ai-outline_v1.1.45-ai.1.xpi
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout custom patches
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: "22"
-
-      - name: Set up pnpm 9.15.1
-        uses: pnpm/action-setup@v4
+          node-version: '22'
+      - uses: pnpm/action-setup@v4
         with:
-          version: "9.15.1"
-
-      - name: Download pinned Jasminum source
+          version: '9.15.1'
+      - name: Download pinned official v1.1.45
         run: |
           git clone --quiet https://github.com/l0o0/jasminum.git jasminum-src
           git -C jasminum-src checkout --quiet "$UPSTREAM_REF"
-
-      - name: Apply feature and branding patches
+      - name: Apply incremental customization and metadata
         run: |
-          python3 patches/patch_jasminum_silent_outline.py jasminum-src
-          python3 patches/patch_jasminum_outline_progress.py jasminum-src
+          python3 patches/patch_smart_outline.py jasminum-src
           python3 patches/patch_jasminum_release_metadata.py jasminum-src
-
-      - name: Install dependencies
+          cp build-support/pnpm-lock.yaml jasminum-src/pnpm-lock.yaml
+      - name: Install locked dependencies
         working-directory: jasminum-src
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Type check and build XPI
+        run: pnpm install --frozen-lockfile
+      - name: Run upstream and smart outline tests
+        run: python3 tests/run-tests.py jasminum-src
+      - name: Type check and build
         working-directory: jasminum-src
         run: pnpm run build
-
-      - name: Prepare and validate XPI metadata
-        run: |
-          set -euo pipefail
-          test -s jasminum-src/build/jasminum_1.1.44-ai.2.xpi
-          cp jasminum-src/build/jasminum_1.1.44-ai.2.xpi "$RELEASE_FILE"
-          python3 - <<'PY'
-          import json
-          import os
-          import zipfile
-          from pathlib import Path
-          xpi = Path(os.environ["RELEASE_FILE"])
-          import tempfile
-          # The upstream scaffold reinjects update_url during packing.
-          # Remove it from the final XPI without adding a duplicate ZIP entry.
-          with tempfile.NamedTemporaryFile(suffix=".xpi", dir=xpi.parent, delete=False) as tmp:
-              temp_path = Path(tmp.name)
-          try:
-              with zipfile.ZipFile(xpi, "r") as source, zipfile.ZipFile(temp_path, "w") as target:
-                  candidates = [name for name in source.namelist() if name in ("manifest.json", "addon/manifest.json")]
-                  assert len(candidates) == 1, f"Missing/ambiguous manifest.json: {candidates}"
-                  for member in source.infolist():
-                      data = source.read(member.filename)
-                      if member.filename == candidates[0]:
-                          manifest = json.loads(data)
-                          manifest["applications"]["zotero"].pop("update_url", None)
-                          data = (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-                      target.writestr(member, data)
-              os.replace(temp_path, xpi)
-          finally:
-              if temp_path.exists():
-                  temp_path.unlink()
-          # Read it back to verify the actual user-installable XPI.
-          with zipfile.ZipFile(xpi, "r") as z:
-              assert z.testzip() is None, "Corrupt XPI ZIP"
-              manifest = json.loads(z.read(candidates[0]))
-          assert manifest.get("version") == "1.1.44.2", manifest
-          assert manifest.get("name") == "Zotero-jasminum-ai-outline", manifest
-          zotero = manifest["applications"]["zotero"]
-          assert zotero.get("id") == "jasminum@linxzh.com", zotero
-          assert "update_url" not in zotero, zotero
-          print("Validated:", xpi, "size=", xpi.stat().st_size, "version=", manifest["version"])
-          PY
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+      - name: Validate installable XPI and SHA256
+        run: python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.1.xpi "$RELEASE_FILE"
+      - uses: actions/upload-artifact@v4
         with:
           name: Zotero-jasminum-ai-outline-XPI
-          path: ${{ env.RELEASE_FILE }}
+          path: |
+            ${{ env.RELEASE_FILE }}
+            ${{ env.RELEASE_FILE }}.sha256
           if-no-files-found: error
-
-      - name: Publish new GitHub Release without overwriting old versions
+      - name: Publish a new release without overwriting previous versions
         if: github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Release $TAG already exists; bump the tag and versions before publishing again."
+            echo "Release $TAG already exists; refusing to replace any asset."
             exit 1
           fi
-          gh release create "$TAG" "$RELEASE_FILE" \
-            --title "Zotero-jasminum-ai-outline v1.1.44-ai.2" \
-            --notes "茉莉花 Jasminum 1.1.44 非官方优化版。AI 全文大纲后台静默识别、自动写入、工具栏常驻和进度提示。插件显示名称：Zotero-jasminum-ai-outline；Zotero 内部版本号：1.1.44.2；使用与原版相同的插件 ID 以替换原版；禁用上游自动更新以避免覆盖修改。请先使用 PDF 副本测试。源码补丁见仓库 patches/；遵循 AGPL-3.0-or-later。"
+          gh release create "$TAG" "$RELEASE_FILE" "$RELEASE_FILE.sha256" \
+            --title "Zotero-jasminum-ai-outline $TAG" --notes-file RELEASE-NOTES.md

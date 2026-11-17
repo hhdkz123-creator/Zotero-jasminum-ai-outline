@@ -1,0 +1,135 @@
+{
+  "version": "1.1.45-ai.1",
+  "upstream": "d3b1b3227b0e46aaf56585c5c09ff9e343152ce4",
+  "cjsSuites": 14,
+  "smartTests": 19,
+  "typecheck": "pass",
+  "build": "pass",
+  "nativeZotero": "10.0.9",
+  "nativeAITransport": "deterministic HTTP fixture; no real provider calls",
+  "nativeChecks": [
+    {
+      "name": "v1.1.45.1 active",
+      "pass": true
+    },
+    {
+      "name": "local 297 real toolbar saves without AI",
+      "pass": true,
+      "detail": {
+        "calls": 0,
+        "images": 0,
+        "status": "已保存 · 0 次 · 0 图"
+      }
+    },
+    {
+      "name": "real PDF three hierarchy levels",
+      "pass": true
+    },
+    {
+      "name": "second chapter physical destination 144",
+      "pass": true
+    },
+    {
+      "name": "sidecar and PDF both saved",
+      "pass": true
+    },
+    {
+      "name": "backup retained",
+      "pass": true
+    },
+    {
+      "name": "repeat protects existing outline",
+      "pass": true
+    },
+    {
+      "name": "real scan pauses at 2 requests",
+      "pass": true,
+      "detail": {
+        "calls": 2,
+        "images": 8
+      }
+    },
+    {
+      "name": "v1.1.45.1 active",
+      "pass": true
+    },
+    {
+      "name": "restart restores cache and cumulative limit without request",
+      "pass": true
+    },
+    {
+      "name": "explicit quota continue reaches automatic save",
+      "pass": true,
+      "detail": {
+        "calls": 3,
+        "images": 12,
+        "status": "已保存 · 5 次 · 20 图"
+      }
+    },
+    {
+      "name": "scan hierarchy and links saved",
+      "pass": true
+    },
+    {
+      "name": "real counters persisted including actual tokens",
+      "pass": true,
+      "detail": {
+        "requests": 5,
+        "imagePages": 20,
+        "uniquePages": 20,
+        "localPages": 36,
+        "tokens": {
+          "prompt_tokens": 500,
+          "completion_tokens": 50,
+          "total_tokens": 550
+        }
+      }
+    },
+    {
+      "name": "full mode real UI processes 17 pages in 4 requests and saves",
+      "pass": true
+    },
+    {
+      "name": "full mode PDF actually has nested destinations",
+      "pass": true
+    },
+    {
+      "name": "buttons restored and pause hidden",
+      "pass": true
+    },
+    {
+      "name": "settings UI reflects current mode",
+      "pass": true
+    },
+    {
+      "name": "clicking real sidebar title navigates to physical page 144",
+      "pass": true
+    },
+    {
+      "name": "settings controls really persist mode and numeric quota",
+      "pass": true
+    },
+    {
+      "name": "recognition settings survive restart",
+      "pass": true
+    }
+  ],
+  "nativeScanUsage": {
+    "requests": 5,
+    "imagePages": 20,
+    "uniquePages": 20,
+    "localPages": 36,
+    "tokens": {
+      "prompt_tokens": 500,
+      "completion_tokens": 50,
+      "total_tokens": 550
+    }
+  },
+  "limitations": [
+    "Synthetic PDFs, not the user’s unprovided academic book",
+    "AI recognition and token usage use HTTP fixture responses",
+    "Other Zotero/OS versions need validation",
+    "Sample-based mapping cannot prove all unsampled local offsets are absent",
+    "No global OS lock or cross-file crash transaction; backups provided"
+  ]
+}
