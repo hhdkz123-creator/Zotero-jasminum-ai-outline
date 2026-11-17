@@ -2,7 +2,7 @@
 
 基于官方 [Jasminum v1.1.45](https://github.com/l0o0/jasminum/releases/tag/v1.1.45) 的非官方优化版。固定源码提交 `d3b1b3227b0e46aaf56585c5c09ff9e343152ce4`，保留官方目录识别、书籍元数据等功能，并移植本机定制界面。公开增量补丁可审查、可重建，未用官方文件整体覆盖定制工程。
 
-发行版本 **v1.1.45-ai.1**，Zotero 内部版本 **1.1.45.1**。保留插件 ID `jasminum@linxzh.com`、模型、Base URL、认证方式与已有用户偏好；通过本仓库的空更新清单禁用自动更新，避免覆盖定制代码（Zotero 10 要求 manifest 保留有效的 `update_url` 字段）。旧 Release 和旧安装包保留。
+发行版本 **v1.1.45-ai.2**，Zotero 内部版本 **1.1.45.2**。保留插件 ID `jasminum@linxzh.com`、模型、Base URL、认证方式与已有用户偏好；通过本仓库的空更新清单禁用自动更新，避免覆盖定制代码（Zotero 10 要求 manifest 保留有效的 `update_url` 字段）。旧 Release 和旧安装包保留。
 
 ## 安装与模式
 
@@ -12,6 +12,8 @@
 
 - **智能节省模式（默认）**：检查已有大纲 → 本地目录解析和逐标题定位 → AI 目录优先 → 校准/抽样 → 必要时全文兜底。目录可信且跳转验证通过就结束，不将 297 页当作必须发送的目标。
 - **完整识别模式**：每批最多 5 页，检查全部页面上的可见标题。用于需要目录没有列出的细节标题的文献。智能模式只承诺保留实际目录列出的层级，不会根据一级目录虚构二、三级标题。
+
+修复启动恢复 PDF 早于插件事件注册时按钮缺失的问题，启动后会补初始化已有阅读器。
 
 本机原有的 PDF 大纲侧栏 AI 按钮、常驻保存按钮、静默运行、旋转动画、暂停/继续、自动保存 PDF 与茉莉花大纲、自动识别开关和失败重试均已移植。正常运行不打开任务/核对窗口。失败时显示原因；识别失败后继续已缓存页面，保存失败优先重试保存，不重新付费识别。
 
@@ -67,7 +69,7 @@ cp build-support/pnpm-lock.yaml jasminum-src/pnpm-lock.yaml
 (cd jasminum-src && pnpm install --frozen-lockfile)
 python3 tests/run-tests.py jasminum-src
 (cd jasminum-src && pnpm run build)
-python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.1.xpi Zotero-jasminum-ai-outline_v1.1.45-ai.1.xpi
+python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.2.xpi Zotero-jasminum-ai-outline_v1.1.45-ai.2.xpi
 ```
 
 CI 使用 Node.js 22、pnpm 9.15.1、锁定依赖。构建会执行 TypeScript 检查，XPI 再验证 ZIP 完整性、名称、版本、插件 ID 与禁用自动更新，生成 SHA256。已有 Release 会令发布步骤停止，不覆盖附件。

@@ -87,6 +87,32 @@ index 4d0a61a..3570dc0 100644
 +
 +pref("outlineRecognitionMode", "smart");
 +pref("outlineRequestLimit", 12);
+diff --git a/src/modules/notifier.ts b/src/modules/notifier.ts
+index 7771c80..a3cdc0e 100644
+--- a/src/modules/notifier.ts
++++ b/src/modules/notifier.ts
+@@ -140,6 +140,21 @@ export function registerTab() {
+     onSelectionContextMenu,
+     config.addonID,
+   );
++
++  // Restored tabs can render before this add-on registers its listeners.
++  // Initialize those readers as well; addOutlineToReader deduplicates concurrent events.
++  for (const reader of [...Zotero.Reader._readers]) {
++    void Promise.resolve(reader._initPromise)
++      .then(async () => {
++        if (
++          !getPref("enableBookmark") ||
++          !Zotero.Reader._readers.includes(reader)
++        )
++          return;
++        await registerOutline(reader.tabID);
++      })
++      .catch(() => ztoolkit.log("Unable to initialize a restored PDF outline"));
++  }
+ }
+ 
+ async function tabRegisterCallback(event: any) {
 diff --git a/src/modules/outline/auto.ts b/src/modules/outline/auto.ts
 new file mode 100644
 index 0000000..d7d4e17
@@ -2539,6 +2565,67 @@ index 0000000..902e663
 +  fresh.agent.restoreCache(h.cache);
 +  assert.equal(fresh.agent.requests, 0);
 +  assert.equal(fresh.agent.inspectedPages, 0);
++});
+diff --git a/test/smart/startup.test.cjs b/test/smart/startup.test.cjs
+new file mode 100644
+index 0000000..a450ed3
+--- /dev/null
++++ b/test/smart/startup.test.cjs
+@@ -0,0 +1,55 @@
++const { test } = require("node:test");
++const assert = require("node:assert/strict");
++const { load } = require("./helpers.cjs");
++function setup(enabled = true) {
++  const hooks = [],
++    calls = [];
++  let resolve;
++  const waiting = new Promise((r) => (resolve = r));
++  const reader = { tabID: "restored-pdf", _initPromise: waiting };
++  const api = load(
++    "src/modules/notifier.ts",
++    {
++      "../../package.json": { config: { addonID: "jasminum@linxzh.com" } },
++      "../utils/locale": {},
++      "../utils/prefs": { getPref: () => enabled },
++      "../utils/detect": {},
++      "./outline": { registerOutline: async (id) => calls.push(id) },
++      "./outline/selection": {
++        onSelectionPopup() {},
++        onSelectionContextMenu() {},
++      },
++      "./tools": {},
++    },
++    {
++      Zotero: {
++        Reader: {
++          _readers: [reader],
++          registerEventListener: (type, handler) =>
++            hooks.push({ type, handler }),
++        },
++      },
++      ztoolkit: { log() {} },
++    },
++  );
++  return { api, reader, hooks, calls, resolve };
++}
++test("启动时补初始化已恢复的PDF，同时保留正常工具栏事件入口", async () => {
++  const h = setup();
++  h.api.registerTab();
++  assert.equal(h.calls.length, 0);
++  h.resolve();
++  await new Promise(setImmediate);
++  assert.deepEqual(h.calls, ["restored-pdf"]);
++  await h.hooks
++    .find((h) => h.type === "renderToolbar")
++    .handler({ reader: { tabID: "new-pdf" } });
++  assert.deepEqual(h.calls, ["restored-pdf", "new-pdf"]);
++});
++test("已关闭的大纲功能不会被启动补初始化重新打开", async () => {
++  const h = setup(false);
++  h.api.registerTab();
++  h.resolve();
++  await new Promise(setImmediate);
++  assert.equal(h.calls.length, 0);
 +});
 diff --git a/test/smart/state.test.cjs b/test/smart/state.test.cjs
 new file mode 100644

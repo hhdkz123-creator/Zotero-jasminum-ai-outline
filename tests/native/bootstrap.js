@@ -11,7 +11,7 @@ async function run(){
   await Zotero.uiReadyPromise;await Zotero.Libraries.get(Zotero.Libraries.userLibraryID).waitForDataLoad('item');
   await wait('plugin',()=>Zotero.Jasminum?.data.alive&&Zotero.Reader._registeredListeners.some(l=>l.pluginID==='jasminum@linxzh.com'&&l.type==='renderToolbar'));
   const {AddonManager}=ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
-  check('v1.1.45.1 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.1');
+  check('v1.1.45.2 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.2');
   Zotero.Prefs.set('extensions.jasminum.autoRecognizeOutline',false,true);
   const rows=[['第一章 理论基础',1,1],['第一节 研究方法',2,2],['一、核心概念',3,3],['第二章 历史分析',1,130],['第一节 材料分析',2,131],['一、史料说明',3,132],['第三章 结论',1,280]];
   let calls=0,images=0;
