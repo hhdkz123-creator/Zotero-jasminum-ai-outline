@@ -1,4 +1,8 @@
-# v1.1.45-ai.3 实施与验收记录
+# v1.1.45-ai.4 实施与验收记录
+
+## ai.4 侧栏修复
+
+`src/modules/outline/index.ts` 将模式选择从进度行移到独立按钮组，等待明确选择时才显示。`src/modules/outline/style.ts` 为选项提供横向排版和整按钮换行，保存和 AI 图标保留独立区域。`tests/native/bootstrap.js` 验证隐藏、冲突出现、窄宽度排版和选择后续跑。
 
 ## 基线与移植
 

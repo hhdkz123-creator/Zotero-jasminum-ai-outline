@@ -2,7 +2,7 @@
 
 基于官方 [Jasminum v1.1.45](https://github.com/l0o0/jasminum/releases/tag/v1.1.45) 的非官方优化版。固定源码提交 `d3b1b3227b0e46aaf56585c5c09ff9e343152ce4`，保留官方目录识别、书籍元数据等功能，并移植本机定制界面。公开增量补丁可审查、可重建，未用官方文件整体覆盖定制工程。
 
-发行版本 **v1.1.45-ai.3**，Zotero 内部版本 **1.1.45.3**。保留插件 ID `jasminum@linxzh.com`、模型、Base URL、认证方式与已有用户偏好；通过本仓库的空更新清单禁用自动更新，避免覆盖定制代码（Zotero 10 要求 manifest 保留有效的 `update_url` 字段）。旧 Release 和旧安装包保留。
+发行版本 **v1.1.45-ai.4**，Zotero 内部版本 **1.1.45.4**。保留插件 ID `jasminum@linxzh.com`、模型、Base URL、认证方式与已有用户偏好；通过本仓库的空更新清单禁用自动更新，避免覆盖定制代码（Zotero 10 要求 manifest 保留有效的 `update_url` 字段）。旧 Release 和旧安装包保留。
 
 ## 安装与模式
 
@@ -19,7 +19,7 @@
 
 已有非空大纲（PDF、茉莉花缓存或当前界面任一来源）会保留并停止重复识别；发现无效跳转则报告问题并保留原数据。此保护也适用于完整模式。如需对已有目录生成另一版本，请先在 PDF 副本中手动整理/移除已有大纲，避免意外覆盖。
 
-缓存模式与设置不同时，会在侧栏显示选择按钮，避免丢弃旧缓存或悄悄改变识别目标。反向 MediaBox/CropBox 的有效 PDF 现在先归一化页面框再渲染，避免 `Invalid PDF page geometry`。
+缓存模式与设置不同时，侧栏会在进度下方显示独立的选择区。按钮文字保持横排，可整颗换行。选择后继续原有流程，避免丢弃旧缓存或悄悄改变识别目标。反向 MediaBox/CropBox 的有效 PDF 现在先归一化页面框再渲染，避免 `Invalid PDF page geometry`。
 
 ## 分级识别与跳转
 
@@ -72,7 +72,7 @@ cp build-support/pnpm-lock.yaml jasminum-src/pnpm-lock.yaml
 (cd jasminum-src && pnpm install --frozen-lockfile)
 python3 tests/run-tests.py jasminum-src
 (cd jasminum-src && pnpm run build)
-python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.3.xpi Zotero-jasminum-ai-outline_v1.1.45-ai.3.xpi
+python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.4.xpi Zotero-jasminum-ai-outline_v1.1.45-ai.4.xpi
 ```
 
 CI 使用 Node.js 22、pnpm 9.15.1、锁定依赖。构建会执行 TypeScript 检查，XPI 再验证 ZIP 完整性、名称、版本、插件 ID 与禁用自动更新，生成 SHA256。已有 Release 会令发布步骤停止，不覆盖附件。

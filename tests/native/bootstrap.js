@@ -11,7 +11,7 @@ async function run(){
   await Zotero.uiReadyPromise;await Zotero.Libraries.get(Zotero.Libraries.userLibraryID).waitForDataLoad('item');
   await wait('plugin',()=>Zotero.Jasminum?.data.alive&&Zotero.Reader._registeredListeners.some(l=>l.pluginID==='jasminum@linxzh.com'&&l.type==='renderToolbar'));
   const {AddonManager}=ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
-  check('v1.1.45.3 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.3');
+  check('v1.1.45.4 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.4');
   Zotero.Prefs.set('extensions.jasminum.autoRecognizeOutline',false,true);
   const rows=[['第一章 理论基础',1,1],['第一节 研究方法',2,2],['一、核心概念',3,3],['第二章 历史分析',1,130],['第一节 材料分析',2,131],['一、史料说明',3,132],['第三章 结论',1,280]];
   let calls=0,images=0;
@@ -60,7 +60,31 @@ async function run(){
    report.scannedKey=scanned.key;report.phase1=true;report.stage='restart-required';await save();Zotero.HTTP.request=original;Zotero.Utilities.Internal.quit();return;
   }
   report.stage='restart-cache';await save();Zotero.Prefs.set('extensions.jasminum.outlineRecognitionMode','smart',true);Zotero.Prefs.set('extensions.jasminum.outlineRequestLimit',2,true);
-  const scanned=Zotero.Items.get(report.scannedID), ui=await open(scanned);await click(ui);
+  const scanned=Zotero.Items.get(report.scannedID), ui=await open(scanned);
+  ui.reader.toggleSidebar(true);
+  ui.doc.getElementById('j-outline-button').click();
+  const choices=ui.doc.querySelector('.j-outline-ai-mode-actions');
+  check('mode actions occupy no space before choice',choices.hidden&&choices.getBoundingClientRect().height===0);
+  Zotero.Prefs.set('extensions.jasminum.outlineRecognitionMode','full',true);
+  await click(ui);
+  check('mode conflict displays both choices without making a request',!choices.hidden&&choices.children.length===2&&calls===0);
+  const toolbar=ui.doc.getElementById('j-outline-toolbar');
+  const widthBefore=toolbar.style.width;
+  for(const width of [140,200,340]){
+   toolbar.style.width=width+'px';
+   const toolbarRect=toolbar.getBoundingClientRect();
+   const choicesRect=choices.getBoundingClientRect();
+   const items=Array.from(choices.children);
+   check('mode buttons stay readable and above contents at '+width,
+    choicesRect.bottom<=ui.doc.getElementById('sidebarContent').getBoundingClientRect().top+1&&items.every(button=>{
+     const rect=button.getBoundingClientRect();
+     return rect.width>24&&rect.height>=28&&rect.right<=toolbarRect.right+1&&button.scrollWidth<=button.clientWidth+1;
+    }));
+  }
+  toolbar.style.width=widthBefore;
+  choices.querySelector('#j-outline-ai-mode-cached').click();
+  await wait('cached mode resumes',()=>!ui.button.disabled);
+  check('mode actions disappear after selection',choices.hidden&&choices.getBoundingClientRect().height===0);
   check('restart restores cache and cumulative limit without request',calls===0&&task(scanned).quotaPaused&&task(scanned).usage.requests===2);
   for(let i=0;i<4&&task(scanned)?.canResume;i++)await click(ui);
   check('explicit quota continue reaches automatic save',ui.doc.querySelector('.j-outline-ai-progress').textContent.includes('已保存'),{calls,images,status:ui.doc.querySelector('.j-outline-ai-progress').textContent});
