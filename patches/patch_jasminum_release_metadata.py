@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Brand a pinned Jasminum source checkout as Zotero-jasminum-ai-outline.
 
-Package version is valid semver (1.1.45-ai.2), whereas Firefox/Zotero
-manifest version is numeric (1.1.45.2), newer than upstream 1.1.45.
+Package version is valid semver (1.1.45-ai.3), whereas Firefox/Zotero
+manifest version is numeric (1.1.45.3), newer than upstream 1.1.45.
 The original add-on ID is retained to make this a replacement rather than
 a second conflicting installation. Use a custom empty update feed required by Zotero 10.
 """
@@ -20,7 +20,7 @@ if pkg.get("version") != "1.1.45":
     raise SystemExit("仅支持固定的上游版本 1.1.45")
 if pkg["config"]["addonID"] != "jasminum@linxzh.com":
     raise SystemExit("插件 ID 与预期不符，已终止")
-pkg["version"] = "1.1.45-ai.2"
+pkg["version"] = "1.1.45-ai.3"
 pkg["config"]["addonName"] = "Zotero-jasminum-ai-outline"
 pkg["description"] = "Zotero Jasminum AI outline enhanced edition (unofficial)"
 pkg["homepage"] = "https://github.com/hhdkz123-creator/Zotero-jasminum-ai-outline"
@@ -40,7 +40,7 @@ needle = "buildVersion: pkg.version,"
 if config.count(needle) != 1:
     raise SystemExit("找不到唯一的 buildVersion 配置")
 config_path.write_text(
-    config.replace(needle, 'buildVersion: "1.1.45.2",', 1),
+    config.replace(needle, 'buildVersion: "1.1.45.3",', 1),
     encoding="utf-8",
 )
 print("版本与名称已更新；已设置本仓库空更新清单以禁用自动更新，保留原插件 ID。")

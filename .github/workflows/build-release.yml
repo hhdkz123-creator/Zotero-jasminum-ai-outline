@@ -8,8 +8,8 @@ permissions:
   contents: write
 env:
   UPSTREAM_REF: d3b1b3227b0e46aaf56585c5c09ff9e343152ce4
-  TAG: v1.1.45-ai.2
-  RELEASE_FILE: Zotero-jasminum-ai-outline_v1.1.45-ai.2.xpi
+  TAG: v1.1.45-ai.3
+  RELEASE_FILE: Zotero-jasminum-ai-outline_v1.1.45-ai.3.xpi
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -39,7 +39,7 @@ jobs:
         working-directory: jasminum-src
         run: pnpm run build
       - name: Validate installable XPI and SHA256
-        run: python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.2.xpi "$RELEASE_FILE"
+        run: python3 tests/prepare-xpi.py jasminum-src/build/jasminum_1.1.45-ai.3.xpi "$RELEASE_FILE"
       - uses: actions/upload-artifact@v4
         with:
           name: Zotero-jasminum-ai-outline-XPI

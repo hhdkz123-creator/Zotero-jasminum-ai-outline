@@ -13,7 +13,7 @@ try:
             if entry.filename=='manifest.json':
                 manifest=json.loads(data)
                 assert manifest['name']=='Zotero-jasminum-ai-outline'
-                assert manifest['version']=='1.1.45.2'
+                assert manifest['version']=='1.1.45.3'
                 assert manifest['applications']['zotero']['id']=='jasminum@linxzh.com'
                 manifest['applications']['zotero']['update_url']='https://raw.githubusercontent.com/hhdkz123-creator/Zotero-jasminum-ai-outline/main/updates-manual.json'
                 data=json.dumps(manifest,ensure_ascii=False,indent=2).encode()

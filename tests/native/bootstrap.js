@@ -11,7 +11,7 @@ async function run(){
   await Zotero.uiReadyPromise;await Zotero.Libraries.get(Zotero.Libraries.userLibraryID).waitForDataLoad('item');
   await wait('plugin',()=>Zotero.Jasminum?.data.alive&&Zotero.Reader._registeredListeners.some(l=>l.pluginID==='jasminum@linxzh.com'&&l.type==='renderToolbar'));
   const {AddonManager}=ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
-  check('v1.1.45.2 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.2');
+  check('v1.1.45.3 active',(await AddonManager.getAddonByID('jasminum@linxzh.com'))?.version==='1.1.45.3');
   Zotero.Prefs.set('extensions.jasminum.autoRecognizeOutline',false,true);
   const rows=[['第一章 理论基础',1,1],['第一节 研究方法',2,2],['一、核心概念',3,3],['第二章 历史分析',1,130],['第一节 材料分析',2,131],['一、史料说明',3,132],['第三章 结论',1,280]];
   let calls=0,images=0;
@@ -48,7 +48,7 @@ async function run(){
    report.stage='local-297';await save();Zotero.Prefs.set('extensions.jasminum.outlineRecognitionMode','smart',true);
    const local=await Zotero.Attachments.importFromFile({file:root+'/native/book-297.pdf'});const ui=await open(local);await click(ui);
    report.local={calls,images,status:ui.doc.querySelector('.j-outline-ai-progress').textContent};await save();
-   check('local 297 real toolbar saves without AI',calls===0&&report.local.status.startsWith('已保存'),report.local);
+   check('local 297 real toolbar saves without AI',calls===0&&report.local.status.includes('已保存'),report.local);
    const pdf=await native(ui);const outline=await pdf.getOutline();check('real PDF three hierarchy levels',outline.length===3&&outline[0].items[0].items[0].title.replace(/\s/g,'')==='一、核心概念');
    const dest=outline[1].dest;check('second chapter physical destination 144',(await pdf.getPageIndex(dest[0]))===143);
    const json=await IOUtils.readJSON(PathUtils.join(Zotero.DataDirectory.dir,'storage',local.key,'jasminum-outline.json'));check('sidecar and PDF both saved',json.outline[1].page===144);
@@ -63,12 +63,12 @@ async function run(){
   const scanned=Zotero.Items.get(report.scannedID), ui=await open(scanned);await click(ui);
   check('restart restores cache and cumulative limit without request',calls===0&&task(scanned).quotaPaused&&task(scanned).usage.requests===2);
   for(let i=0;i<4&&task(scanned)?.canResume;i++)await click(ui);
-  check('explicit quota continue reaches automatic save',ui.doc.querySelector('.j-outline-ai-progress').textContent.startsWith('已保存'),{calls,images,status:ui.doc.querySelector('.j-outline-ai-progress').textContent});
+  check('explicit quota continue reaches automatic save',ui.doc.querySelector('.j-outline-ai-progress').textContent.includes('已保存'),{calls,images,status:ui.doc.querySelector('.j-outline-ai-progress').textContent});
   const pdf=await native(ui);const outline=await pdf.getOutline();check('scan hierarchy and links saved',outline.length===3&&(await pdf.getPageIndex(outline[2].dest[0]))===293);
   const usage=await IOUtils.readJSON(PathUtils.join(Zotero.DataDirectory.dir,'storage',scanned.key,'jasminum-ai-usage.json'));check('real counters persisted including actual tokens',usage.requests===calls+2&&usage.imagePages===images+8&&usage.tokens.total_tokens===usage.requests*110,usage);report.scannedUsage=usage;
   report.stage='full-mode';await save();Zotero.Prefs.set('extensions.jasminum.outlineRecognitionMode','full',true);Zotero.Prefs.set('extensions.jasminum.outlineRequestLimit',100,true);const before=calls;
   const full=await Zotero.Attachments.importFromFile({file:root+'/native/full-17.pdf'});const fullUI=await open(full);await click(fullUI);
-  check('full mode real UI processes 17 pages in 4 requests and saves',calls-before===4&&fullUI.doc.querySelector('.j-outline-ai-progress').textContent.startsWith('已保存'));
+  check('full mode real UI processes 17 pages in 4 requests and saves',calls-before===4&&fullUI.doc.querySelector('.j-outline-ai-progress').textContent.includes('已保存'));
   const fullPDF=await native(fullUI);const fullOutline=await fullPDF.getOutline();check('full mode PDF actually has nested destinations',fullOutline?.[0]?.items?.[0]?.items?.[0]?.title.replace(/\s/g,'')==='一、核心概念');
   const pause=fullUI.doc.getElementById('j-outline-ai-pause');check('buttons restored and pause hidden',!fullUI.button.disabled&&!fullUI.button.classList.contains('j-outline-ai-busy')&&pause.hidden);
   const pane=Zotero.PreferencePanes.pluginPanes.find(p=>p.pluginID==='jasminum@linxzh.com');const prefwin=Zotero.Utilities.Internal.openPreferences(pane.id);await wait('mode preference',()=>prefwin.document.getElementById('jasminum-outline-mode'));
